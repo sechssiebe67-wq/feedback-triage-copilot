@@ -28,8 +28,9 @@ python3 -m feedback_triage --workspace workspace.json serve --port 8080
 ```
 
 Open <http://localhost:8080>. The dashboard lets you re-cluster, merge, split,
-discard and rename clusters; every correction is written to an append-only
-history.
+discard, rename and restore clusters; every correction is written to an
+append-only history. Discarded clusters stay visible in a separate section so
+they can be restored.
 
 ### CLI commands
 

@@ -12,6 +12,7 @@ from typing import Dict, Iterable, Tuple
 from urllib.parse import parse_qs, unquote
 
 from .ingest import parse_csv
+from .models import ACTIVE
 from .report import (
     build_report,
     report_to_csv,
@@ -194,9 +195,17 @@ class FeedbackTriageApp:
 
     def _dashboard(self) -> str:
         report = build_report(self.store)
-        return DASHBOARD_TEMPLATE.replace(
-            "__REPORT__", _json_for_script(report)
-        ).replace("__CONTROLS__", _controls_script())
+        discarded = [
+            {"id": c.id, "label": c.label, "size": len(c.item_ids)}
+            for c in self.store.clusters
+            if c.status != ACTIVE
+        ]
+        return (
+            DASHBOARD_TEMPLATE
+            .replace("__REPORT__", _json_for_script(report))
+            .replace("__DISCARDED__", _json_for_script(discarded))
+            .replace("__CONTROLS__", _controls_script())
+        )
 
 
 def _json_for_script(payload: object) -> str:
@@ -267,6 +276,7 @@ a{color:#2563eb;word-break:break-all}
 <main>
 <div class="toolbar">
 <button class="primary" onclick="recluster()">Re-cluster</button>
+<button onclick="doMerge()">Merge selected</button>
 <a href="/report.csv"><button>Export CSV</button></a>
 <a href="/report.pdf"><button>Export PDF</button></a>
 <a href="/api/report"><button>JSON report</button></a>
@@ -277,9 +287,11 @@ a{color:#2563eb;word-break:break-all}
 </div>
 <div id="summary" class="card"></div>
 <div id="clusters"></div>
+<div id="discarded"></div>
 </main>
 <script>
 const REPORT = __REPORT__;
+const DISCARDED = __DISCARDED__;
 __CONTROLS__
 </script>
 </body></html>
@@ -335,6 +347,21 @@ function render(){
     });
   });
 }
+function renderDiscarded(){
+  const root=document.getElementById('discarded');
+  if(!DISCARDED.length){root.innerHTML='';return;}
+  root.innerHTML=`<h2 style="margin:18px 0 0;font-size:1.05rem">Discarded clusters</h2>`+
+    DISCARDED.map(c=>`<section class="card">
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center">
+        <h2>${esc(c.label)}</h2>
+        <button class="restore-action" data-cluster="${attr(c.id)}">Restore</button>
+      </div>
+      <p class="metrics">${c.size} quotes</p>
+    </section>`).join('');
+  root.querySelectorAll('.restore-action').forEach(b=>{
+    b.addEventListener('click',()=>restoreCluster(b.dataset.cluster));
+  });
+}
 async function post(url, body){
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
     body:body?JSON.stringify(body):'{}'});
@@ -345,6 +372,7 @@ async function post(url, body){
 async function mergeSelected(){const ids=selected();if(ids.length<2){alert('Select at least two clusters.');return;}
   if(await post('/api/merge',{cluster_ids:ids}))location.reload();}
 async function discardCluster(id){if(await post(`/api/clusters/${id}/discard`))location.reload();}
+async function restoreCluster(id){if(await post(`/api/clusters/${id}/restore`))location.reload();}
 async function renameCluster(id){const label=prompt('New label');if(!label)return;
   if(await post(`/api/clusters/${id}/rename`,{label}))location.reload();}
 async function splitCluster(id){const items=selectedItems();if(!items.length){alert('Select quotes to split off.');return;}
@@ -358,4 +386,5 @@ async function importFile(){const f=document.getElementById('csv-file').files[0]
   if(r.ok)location.reload();else alert('Import failed');}
 function doMerge(){mergeSelected();}
 render();
+renderDiscarded();
 """

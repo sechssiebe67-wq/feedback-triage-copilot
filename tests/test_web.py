@@ -121,6 +121,37 @@ class WebTests(unittest.TestCase):
         )
         self.assertTrue(status.startswith("400"))
 
+    def test_dashboard_wires_merge_control(self):
+        self.import_csv()
+        _, _, body = self.call("GET", "/")
+        self.assertIn(b'onclick="doMerge()"', body)
+        script = _controls_script()
+        self.assertIn("mergeSelected", script)
+        self.assertIn("doMerge", script)
+
+    def test_dashboard_exposes_restore_for_discarded(self):
+        self.import_csv()
+        _, _, body = self.call("GET", "/api/report")
+        cluster = json.loads(body)["clusters"][0]
+        self.call("POST", "/api/clusters/%s/discard" % cluster["id"])
+        status, _, body = self.call("GET", "/")
+        self.assertTrue(status.startswith("200"))
+        self.assertIn(b"restore-action", body)
+        self.assertIn(b"restoreCluster", body)
+        self.assertIn(cluster["id"].encode(), body)
+        self.assertIn(cluster["label"].encode(), body)
+
+    def test_restore_endpoint_reactivates_cluster(self):
+        self.import_csv()
+        _, _, body = self.call("GET", "/api/report")
+        cluster_id = json.loads(body)["clusters"][0]["id"]
+        self.call("POST", "/api/clusters/%s/discard" % cluster_id)
+        status, _, _ = self.call("POST", "/api/clusters/%s/restore" % cluster_id)
+        self.assertTrue(status.startswith("200"))
+        _, _, body = self.call("GET", "/api/report")
+        active_ids = [c["id"] for c in json.loads(body)["clusters"]]
+        self.assertIn(cluster_id, active_ids)
+
     def test_split_endpoint(self):
         self.import_csv()
         _, _, body = self.call("GET", "/api/report")

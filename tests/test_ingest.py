@@ -17,12 +17,34 @@ class DetectMappingTests(unittest.TestCase):
 
     def test_detects_german_and_support_columns(self):
         mapping = detect_mapping(["Kommentar", "Kundensegment", "Ticket URL"])
-        self.assertIsNotNone(mapping["text"])
-        self.assertIsNotNone(mapping["segment"])
-        self.assertIsNotNone(mapping["url"])
+        self.assertEqual(mapping["text"], "Kommentar")
+        self.assertEqual(mapping["segment"], "Kundensegment")
+        self.assertEqual(mapping["url"], "Ticket URL")
+
+    def test_id_column_is_not_stolen_as_text(self):
+        mapping = detect_mapping(["review_id", "review_body", "plan"])
+        self.assertEqual(mapping["id"], "review_id")
+        self.assertEqual(mapping["text"], "review_body")
+        self.assertEqual(mapping["segment"], "plan")
+
+    def test_ticket_id_column_is_not_stolen_as_text(self):
+        mapping = detect_mapping(["ticket_id", "ticket_subject", "plan"])
+        self.assertEqual(mapping["id"], "ticket_id")
+        self.assertEqual(mapping["text"], "ticket_subject")
 
 
 class ParseCsvTests(unittest.TestCase):
+    def test_keeps_real_text_when_id_column_precedes_it(self):
+        content = (
+            "review_id,review_body,plan\n"
+            "R-1,The app crashes on export,Pro\n"
+        )
+        items = parse_csv(content)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].id, "R-1")
+        self.assertEqual(items[0].text, "The app crashes on export")
+        self.assertEqual(items[0].segment, "Pro")
+
     def test_parses_rows_and_types(self):
         content = (
             "text,segment,source,url,date,rating\n"

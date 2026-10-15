@@ -17,11 +17,12 @@ from .models import FeedbackItem
 TEXT_ALIASES = (
     "text", "comment", "comments", "feedback", "message", "body", "content",
     "review", "reviewtext", "review_text", "description", "note", "notes",
-    "ticket", "subject",
+    "ticket", "subject", "kommentar",
 )
 SEGMENT_ALIASES = (
     "segment", "plan", "tier", "customer_segment", "customer", "account",
     "company_size", "customer_type", "plan_name", "product_plan",
+    "kundensegment",
 )
 SOURCE_ALIASES = ("source", "channel", "origin", "provider", "app", "platform")
 URL_ALIASES = ("url", "link", "source_url", "permalink", "ticket_url", "review_url")
@@ -38,13 +39,32 @@ def _normalise(name: str) -> str:
     return name.strip().lower().replace(" ", "_").replace("-", "_")
 
 
-def _match(fieldnames: Sequence[str], aliases: Sequence[str]) -> Optional[str]:
-    normalised = {_normalise(f): f for f in fieldnames}
+FIELD_ALIASES = (
+    ("text", TEXT_ALIASES),
+    ("segment", SEGMENT_ALIASES),
+    ("source", SOURCE_ALIASES),
+    ("url", URL_ALIASES),
+    ("created_at", DATE_ALIASES),
+    ("rating", RATING_ALIASES),
+    ("language", LANGUAGE_ALIASES),
+    ("id", ID_ALIASES),
+)
+
+
+def _exact_match(normalised: Dict[str, str], aliases: Sequence[str]) -> Optional[str]:
     for alias in aliases:
         if alias in normalised:
             return normalised[alias]
+    return None
+
+
+def _substring_match(
+    normalised: Dict[str, str], aliases: Sequence[str], claimed: set
+) -> Optional[str]:
     # fall back to a substring match so "review body" still resolves to text
     for norm, original in normalised.items():
+        if original in claimed:
+            continue
         for alias in aliases:
             if alias in norm:
                 return original
@@ -52,17 +72,30 @@ def _match(fieldnames: Sequence[str], aliases: Sequence[str]) -> Optional[str]:
 
 
 def detect_mapping(fieldnames: Sequence[str]) -> Dict[str, Optional[str]]:
-    """Return a canonical-field -> csv-column mapping."""
-    return {
-        "text": _match(fieldnames, TEXT_ALIASES),
-        "segment": _match(fieldnames, SEGMENT_ALIASES),
-        "source": _match(fieldnames, SOURCE_ALIASES),
-        "url": _match(fieldnames, URL_ALIASES),
-        "created_at": _match(fieldnames, DATE_ALIASES),
-        "rating": _match(fieldnames, RATING_ALIASES),
-        "language": _match(fieldnames, LANGUAGE_ALIASES),
-        "id": _match(fieldnames, ID_ALIASES),
-    }
+    """Return a canonical-field -> csv-column mapping.
+
+    Exact alias matches are resolved for every canonical field before any
+    substring fallback runs, and a column that is already claimed is never
+    reused. Without this ordering an ``*_id`` column that happens to appear
+    before the text column (for example ``review_id`` ahead of ``review_body``)
+    would be claimed for ``text`` via the ``review`` alias and the real feedback
+    text would be silently dropped.
+    """
+    normalised = {_normalise(f): f for f in fieldnames}
+    mapping: Dict[str, Optional[str]] = {}
+    claimed: set = set()
+    for field, aliases in FIELD_ALIASES:
+        found = _exact_match(normalised, aliases)
+        mapping[field] = found
+        if found is not None:
+            claimed.add(found)
+    for field, aliases in FIELD_ALIASES:
+        if mapping[field] is None:
+            found = _substring_match(normalised, aliases, claimed)
+            if found is not None:
+                mapping[field] = found
+                claimed.add(found)
+    return mapping
 
 
 def _sniff_delimiter(sample: str) -> str:
