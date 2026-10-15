@@ -45,6 +45,15 @@ class BuildReportTests(unittest.TestCase):
             self.assertEqual(len(cluster["quotes"]), min(cluster["size"], 3))
             self.assertIsInstance(cluster["uncertainty"], list)
 
+    def test_report_includes_digest(self):
+        report = build_report(make_store())
+        self.assertIn("digest", report)
+        digest = report["digest"]
+        self.assertIn("window_start", digest)
+        self.assertIn("window_end", digest)
+        self.assertIn("reviewer_load", digest)
+        self.assertIn("unreviewed", digest)
+
     def test_reports_first_and_last_seen(self):
         report = build_report(make_store())
         pdf_cluster = next(
@@ -64,7 +73,10 @@ class CsvTests(unittest.TestCase):
 
     def test_empty_report_still_has_header(self):
         csv_text = report_to_csv(build_report(TriageStore()))
-        self.assertEqual(len(csv_text.strip().splitlines()), 1)
+        lines = csv_text.strip().splitlines()
+        self.assertIn("cluster_id", lines[0])
+        self.assertIn("digest_total_items", lines[0])
+        self.assertEqual(len(lines), 2)  # header + digest summary row
 
     def test_csv_neutralises_formula_injection(self):
         store = TriageStore()

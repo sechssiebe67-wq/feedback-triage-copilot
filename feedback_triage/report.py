@@ -10,13 +10,28 @@ from __future__ import annotations
 import csv
 import io
 import re
-from typing import Dict, List, Sequence
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Sequence
 
 from .cluster import build_tfidf, representative_quotes, tokenize
-from .models import ACTIVE, Cluster, EditEvent, FeedbackItem
+from .models import (
+    ACTIVE,
+    DISCARDED,
+    Cluster,
+    Digest,
+    EditEvent,
+    FeedbackItem,
+    now_iso,
+)
 
 #: How many of the most recent decisions the exported log keeps.
 DECISION_LIMIT = 50
+
+#: Status-changing or renaming actions tracked by the digest.
+CHANGED_ACTIONS = ("discard", "restore", "rename")
+
+#: Default length of a digest window, in days.
+DEFAULT_DIGEST_DAYS = 7
 
 
 def _distribution(values: Sequence[str]) -> Dict[str, int]:
@@ -71,8 +86,165 @@ def build_report(
         },
         "clusters": cluster_entries,
         "decisions": _decision_log(store.history, reviewers_by_id, labels_by_id),
+        "digest": build_digest(store),
     }
     return report
+
+
+def _parse_ts(value: object) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp (date or datetime) into an aware datetime."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def build_digest(
+    store, since: Optional[str] = None, days: int = DEFAULT_DIGEST_DAYS
+) -> Dict[str, object]:
+    """Build the weekly triage digest for a :class:`TriageStore`.
+
+    The digest is a read-only summary derived from the append-only history and
+    the current items/clusters, so it stays auditable and never mutates state.
+    ``since`` is an ISO date/datetime marking the start of the window (inclusive);
+    when omitted the window covers the last ``days`` days up to now.
+    """
+    generated = _parse_ts(now_iso()) or datetime.now(timezone.utc)
+    try:
+        span_days = int(days)
+    except (TypeError, ValueError):
+        span_days = DEFAULT_DIGEST_DAYS
+    if span_days < 0:
+        span_days = 0
+
+    since_value = ""
+    if since is not None and str(since).strip():
+        parsed_since = _parse_ts(since)
+        if parsed_since is None:
+            raise ValueError("Invalid --since value: %s" % since)
+        window_start = parsed_since
+        since_value = str(since).strip()
+    else:
+        window_start = generated - timedelta(days=span_days)
+    window_end = generated
+
+    def in_window(value: object) -> bool:
+        parsed = _parse_ts(value)
+        if parsed is None:
+            return False
+        return window_start <= parsed <= window_end
+
+    items = list(getattr(store, "items", []))
+    clusters = list(getattr(store, "clusters", []))
+    history = list(getattr(store, "history", []))
+
+    reviewer_load: Dict[str, Dict[str, int]] = {}
+    by_action: Dict[str, int] = {}
+    unreviewed = 0
+    decisions = 0
+    changed_ids: List[str] = []
+    changed_meta: Dict[str, Dict[str, str]] = {}
+    touched_ids = set()
+    for event in history:
+        if not in_window(event.timestamp):
+            continue
+        decisions += 1
+        by_action[event.action] = by_action.get(event.action, 0) + 1
+        reviewer = store.reviewer_name(event.reviewer) if event.reviewer else ""
+        if not reviewer:
+            unreviewed += 1
+        else:
+            bucket = reviewer_load.setdefault(reviewer, {})
+            bucket[event.action] = bucket.get(event.action, 0) + 1
+            bucket["total"] = bucket.get("total", 0) + 1
+        event_ids = _event_cluster_ids(event)
+        touched_ids.update(event_ids)
+        if event.action in CHANGED_ACTIONS:
+            for cluster_id in event_ids:
+                changed_ids.append(cluster_id)
+                changed_meta[cluster_id] = {
+                    "reviewer": reviewer,
+                    "note": event.note or "",
+                }
+
+    clusters_by_id = {c.id: c for c in clusters}
+    changed_seen = set()
+    changed_topics: List[Dict[str, object]] = []
+    for cluster_id in changed_ids:
+        if cluster_id in changed_seen:
+            continue
+        changed_seen.add(cluster_id)
+        cluster = clusters_by_id.get(cluster_id)
+        if cluster is None:
+            continue
+        meta = changed_meta.get(cluster_id, {})
+        changed_topics.append({
+            "id": cluster.id,
+            "label": cluster.label,
+            "size": len(cluster.item_ids),
+            "status": cluster.status,
+            "reviewer": meta.get("reviewer", ""),
+            "note": meta.get("note", ""),
+        })
+    changed_topics.sort(key=lambda entry: (-entry["size"], entry["label"]))  # type: ignore[operator]
+    changed_topics = changed_topics[:3]
+
+    untouched_topics: List[Dict[str, object]] = []
+    for cluster in clusters:
+        if cluster.status != ACTIVE:
+            continue
+        if cluster.id in touched_ids:
+            continue
+        untouched_topics.append({
+            "id": cluster.id,
+            "label": cluster.label,
+            "size": len(cluster.item_ids),
+        })
+    untouched_topics.sort(
+        key=lambda entry: (-entry["size"], entry["label"])  # type: ignore[operator]
+    )
+
+    digest = Digest(
+        window_start=window_start.isoformat(),
+        window_end=window_end.isoformat(),
+        since=since_value,
+        generated_at=generated.isoformat(),
+        days=span_days,
+        total_items=len(items),
+        new_items=sum(1 for item in items if in_window(item.created_at)),
+        new_clusters=sum(1 for c in clusters if in_window(c.created_at)),
+        discarded_clusters=sum(1 for c in clusters if c.status == DISCARDED),
+        decisions=decisions,
+        reviewer_load=reviewer_load,
+        decisions_by_action=by_action,
+        unreviewed=unreviewed,
+        untouched_topics=untouched_topics,
+        changed_topics=changed_topics,
+    )
+    return digest.to_dict()
+
+
+def _event_cluster_ids(event: EditEvent) -> List[str]:
+    """Return the cluster ids an edit event refers to."""
+    details = event.details or {}
+    ids: List[str] = []
+    if details.get("cluster_id"):
+        ids.append(str(details["cluster_id"]))
+    if details.get("source"):
+        ids.append(str(details["source"]))
+    for source_id in details.get("sources", []) or []:
+        ids.append(str(source_id))
+    return ids
 
 
 def _decision_log(
@@ -180,7 +352,27 @@ def report_to_csv(report: Dict[str, object]) -> str:
         "quote_source", "quote_segment", "quote_url", "quote_created_at",
         "decision_timestamp", "decision_action", "decision_reviewer",
         "decision_note", "decision_clusters",
+        "digest_window_start", "digest_window_end", "digest_total_items",
+        "digest_new_items", "digest_new_clusters", "digest_discarded_clusters",
+        "digest_decisions", "digest_unreviewed", "digest_reviewer_load",
+        "digest_untouched_topics", "digest_changed_topics", "digest_notes",
     ])
+    digest = report.get("digest") or {}
+    digest_row = [""] * 18 + [
+        digest.get("window_start", ""),
+        digest.get("window_end", ""),
+        digest.get("total_items", 0),
+        digest.get("new_items", 0),
+        digest.get("new_clusters", 0),
+        digest.get("discarded_clusters", 0),
+        digest.get("decisions", 0),
+        digest.get("unreviewed", 0),
+        _reviewer_load_text(digest.get("reviewer_load") or {}),
+        _topics_text(digest.get("untouched_topics") or []),
+        _topics_text(digest.get("changed_topics") or []),
+        _digest_notes_text(digest),
+    ]
+    writer.writerow([_csv_safe(cell) for cell in digest_row])
     empty_decision = ["", "", "", "", ""]
     for cluster in report["clusters"]:  # type: ignore[index]
         quotes = cluster["quotes"] or [{}]  # type: ignore[index]
@@ -255,6 +447,7 @@ def report_to_html(report: Dict[str, object]) -> str:
         )
     if report.get("note"):  # type: ignore[union-attr]
         parts.append('<p class="metrics">%s</p>' % _esc(report["note"]))  # type: ignore[index]
+    parts.extend(_digest_html(report.get("digest") or {}))
     for cluster in report["clusters"]:  # type: ignore[index]
         parts.append('<section class="card">')
         parts.append("<h2>%s</h2>" % _esc(cluster["label"]))
@@ -332,6 +525,152 @@ def _decision_log_html(decisions: Sequence[Dict[str, object]]) -> List[str]:
     return parts
 
 
+def _digest_html(digest: Dict[str, object]) -> List[str]:
+    """Render the weekly digest as a small "This week" card."""
+    if not isinstance(digest, dict):
+        return []
+    parts: List[str] = ['<section class="card"><h2>This week</h2>']
+    parts.append(
+        '<p class="metrics">%s &rarr; %s &middot; %d decisions '
+        "&middot; %d unreviewed</p>"
+        % (
+            _esc(digest.get("window_start", "")),
+            _esc(digest.get("window_end", "")),
+            digest.get("decisions", 0),
+            digest.get("unreviewed", 0),
+        )
+    )
+    parts.append(
+        '<p class="metrics">%d items &middot; %d new &middot; '
+        "%d new topics &middot; %d discarded</p>"
+        % (
+            digest.get("total_items", 0),
+            digest.get("new_items", 0),
+            digest.get("new_clusters", 0),
+            digest.get("discarded_clusters", 0),
+        )
+    )
+    load = digest.get("reviewer_load") or {}
+    if load:
+        entries = []
+        for name in sorted(load):  # type: ignore[arg-type]
+            counts = load[name]  # type: ignore[index]
+            detail = ", ".join(
+                "%s %d" % (action, count)
+                for action, count in sorted(counts.items()) if action != "total"
+            ) or "no decisions"
+            entries.append(
+                "<strong>%s</strong> (%s)" % (_esc(name), _esc(detail))
+            )
+        parts.append(
+            '<p class="metrics">Reviewer load: %s</p>' % " &middot; ".join(entries)
+        )
+    changed = digest.get("changed_topics") or []
+    if changed:
+        parts.append(
+            '<p class="metrics">Top changed topics: %s</p>'
+            % _esc(_topics_text(changed))  # type: ignore[arg-type]
+        )
+        for entry in changed:  # type: ignore[union-attr]
+            reviewer = entry.get("reviewer") or ""
+            note = entry.get("note") or ""
+            if not reviewer and not note:
+                continue
+            parts.append(
+                '<div class="decision"><strong>%s</strong>%s%s</div>'
+                % (
+                    _esc(entry.get("label", "")),
+                    (" &middot; " + _esc(reviewer)) if reviewer else "",
+                    ("<br>" + _esc(note)) if note else "",
+                )
+            )
+    untouched = digest.get("untouched_topics") or []
+    if untouched:
+        parts.append(
+            '<p class="metrics">Untouched topics: %s</p>'
+            % _esc(_topics_text(untouched))  # type: ignore[arg-type]
+        )
+    parts.append("</section>")
+    return parts
+
+
+def _digest_pdf_lines(digest: Dict[str, object]) -> List[tuple]:
+    """Render the weekly digest as a short PDF section."""
+    if not isinstance(digest, dict):
+        return []
+    lines: List[tuple] = [
+        ("This week", 13, True),
+        (
+            "%s to %s: %d decisions, %d unreviewed"
+            % (
+                digest.get("window_start", ""), digest.get("window_end", ""),
+                digest.get("decisions", 0), digest.get("unreviewed", 0),
+            ),
+            9,
+            False,
+        ),
+        (
+            "%d items, %d new, %d new topics, %d discarded"
+            % (
+                digest.get("total_items", 0), digest.get("new_items", 0),
+                digest.get("new_clusters", 0), digest.get("discarded_clusters", 0),
+            ),
+            9,
+            False,
+        ),
+    ]
+    load = digest.get("reviewer_load") or {}
+    if load:
+        lines.append(("Reviewer load: %s" % _reviewer_load_text(load), 9, False))
+    changed = digest.get("changed_topics") or []
+    if changed:
+        lines.append(
+            ("Top changed topics: %s" % _topics_text(changed), 9, False)  # type: ignore[arg-type]
+        )
+    untouched = digest.get("untouched_topics") or []
+    if untouched:
+        lines.append(
+            ("Untouched topics: %s" % _topics_text(untouched), 9, False)  # type: ignore[arg-type]
+        )
+    lines.append(("", 10, False))
+    return lines
+
+
+def _reviewer_load_text(load: Dict[str, Dict[str, int]]) -> str:
+    parts = []
+    for name in sorted(load):
+        counts = load[name]
+        detail = ", ".join(
+            "%s=%d" % (action, count)
+            for action, count in sorted(counts.items()) if action != "total"
+        )
+        parts.append("%s: %s (total %d)" % (name, detail or "none", counts.get("total", 0)))
+    return "; ".join(parts)
+
+
+def _topics_text(topics: Sequence[Dict[str, object]]) -> str:
+    parts = []
+    for entry in topics:
+        text = "%s (%s)" % (entry.get("label", ""), entry.get("size", 0))
+        reviewer = entry.get("reviewer")
+        note = entry.get("note")
+        if reviewer or note:
+            text += " [%s]" % " ".join(
+                str(part) for part in (reviewer, note) if part
+            )
+        parts.append(text)
+    return "; ".join(parts)
+
+
+def _digest_notes_text(digest: Dict[str, object]) -> str:
+    """Return the untrusted notes attached to changed topics, one cell."""
+    return " | ".join(
+        str(entry.get("note"))
+        for entry in (digest.get("changed_topics") or [])  # type: ignore[union-attr]
+        if entry.get("note")
+    )
+
+
 def _fmt_dist(dist: Dict[str, int]) -> str:
     return ", ".join("%s: %d" % (k, v) for k, v in dist.items()) or "none"
 
@@ -381,6 +720,7 @@ def _pdf_lines(report: Dict[str, object]) -> List[tuple]:
         ),
         ("", 10, False),
     ]
+    styles.extend(_digest_pdf_lines(report.get("digest") or {}))
     for cluster in report["clusters"]:  # type: ignore[index]
         styles.append(
             (

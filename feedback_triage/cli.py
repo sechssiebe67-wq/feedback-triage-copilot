@@ -7,7 +7,13 @@ import sys
 from typing import List, Optional
 
 from .ingest import load_csv_file
-from .report import build_report, report_to_csv, report_to_html, report_to_pdf
+from .report import (
+    build_digest,
+    build_report,
+    report_to_csv,
+    report_to_html,
+    report_to_pdf,
+)
 from .store import TriageStore
 
 
@@ -46,6 +52,15 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--reviewer", default="", help="reviewer name for the report header")
     rep.add_argument("--note", default="", help="optional note for the report header")
 
+    digest = sub.add_parser("digest", help="print the weekly triage digest")
+    digest.add_argument(
+        "--since", default="", help="ISO date/datetime start of the window"
+    )
+    digest.add_argument(
+        "--days", type=int, default=7, help="window length in days (default 7)"
+    )
+    digest.add_argument("--format", choices=["text", "json"], default="text")
+
     reviewer = sub.add_parser("reviewer", help="manage reviewer accounts")
     reviewer_sub = reviewer.add_subparsers(dest="reviewer_command", required=True)
     reviewer_add = reviewer_sub.add_parser("add", help="add a reviewer")
@@ -64,6 +79,34 @@ def _print_bytes(data: bytes, out: str) -> None:
         print("Wrote %s" % out)
     else:
         sys.stdout.buffer.write(data)
+
+
+def _print_digest_text(digest: dict) -> None:
+    print("Digest %s -> %s" % (digest["window_start"], digest["window_end"]))
+    print("Items: %d total, %d new in window" % (
+        digest["total_items"], digest["new_items"]))
+    print("Topics: %d new, %d discarded" % (
+        digest["new_clusters"], digest["discarded_clusters"]))
+    print("Decisions in window: %d (unreviewed %d)" % (
+        digest["decisions"], digest["unreviewed"]))
+    load = digest.get("reviewer_load") or {}
+    if load:
+        print("Reviewer load:")
+        for name in sorted(load):
+            counts = load[name]
+            detail = ", ".join(
+                "%s=%d" % (action, count)
+                for action, count in sorted(counts.items()) if action != "total"
+            ) or "none"
+            print("  %s: %s (total %d)" % (name, detail, counts.get("total", 0)))
+    untouched = digest.get("untouched_topics") or []
+    if untouched:
+        print("Untouched topics: %s" % "; ".join(
+            "%s (%s)" % (entry["label"], entry["size"]) for entry in untouched))
+    changed = digest.get("changed_topics") or []
+    if changed:
+        print("Changed topics: %s" % "; ".join(
+            "%s (%s)" % (entry["label"], entry["size"]) for entry in changed))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -126,6 +169,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             if clusters:
                 line += "  [%s]" % ", ".join(clusters)
             print(line)
+        return 0
+
+    if args.command == "digest":
+        try:
+            digest = build_digest(store, since=args.since or None, days=args.days)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if args.format == "json":
+            import json
+
+            print(json.dumps(digest, ensure_ascii=False, indent=2))
+        else:
+            _print_digest_text(digest)
         return 0
 
     if args.command == "report":

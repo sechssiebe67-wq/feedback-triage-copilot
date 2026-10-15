@@ -39,6 +39,7 @@ they can be restored.
 | `import <file> [--source NAME] [--no-recluster] [--reviewer NAME] [--note TEXT]` | Import a feedback CSV |
 | `cluster [--reviewer NAME] [--note TEXT]` | Re-cluster the workspace |
 | `report --format {csv,html,pdf,json} [--out FILE] [--reviewer NAME] [--note TEXT]` | Export the weekly report |
+| `digest [--since ISO-DATE] [--days N] [--format {text,json}]` | Print the weekly triage digest and reviewer load |
 | `reviewer add <name>` | Add a reviewer account |
 | `reviewer list` | List reviewer accounts |
 | `history` | Print the raw correction history |
@@ -50,6 +51,11 @@ they can be restored.
 python3 -m feedback_triage --workspace workspace.json reviewer add "Alice"
 python3 -m feedback_triage --workspace workspace.json import data/sample_support.csv --source support --reviewer Alice
 python3 -m feedback_triage --workspace workspace.json decisions
+
+# weekly digest of activity and reviewer load (text or JSON)
+python3 -m feedback_triage --workspace workspace.json digest
+python3 -m feedback_triage --workspace workspace.json digest --since 2026-01-01 --days 7
+python3 -m feedback_triage --workspace workspace.json digest --format json
 ```
 
 CSV columns are auto-detected (`text`, `segment`, `source`, `url`, `date`,
@@ -62,7 +68,8 @@ delimiter (`,`, `;`, tab, `|`) is sniffed automatically.
 | --- | --- | --- |
 | GET | `/` | HTML dashboard |
 | GET | `/healthz` | Health probe (items, clusters) |
-| GET | `/api/report` | Weekly report as JSON |
+| GET | `/api/report` | Weekly report as JSON (includes the `digest` section) |
+| GET | `/api/digest` | Weekly digest and reviewer load as JSON |
 | GET | `/api/clusters`, `/api/items`, `/api/history` | Raw data |
 | GET | `/api/reviewers` | List reviewer accounts |
 | POST | `/api/reviewers` | `{"name": "Alice"}` |
@@ -92,6 +99,38 @@ CSV exports render the same log, escaping untrusted reviewer names and notes
 and neutralising formula-leading cells. Workspaces created before reviewer
 attribution load unchanged: missing `reviewers` and `reviewer`/`note` fields
 default to empty.
+
+## Weekly digest and reviewer load
+
+The digest makes the weekly triage load visible at a glance: how many decisions
+were taken, by whom, and which topics are still unreviewed. It is exposed by
+`digest` on the CLI, `GET /api/digest`, the `digest` key of `/api/report`, and a
+"This week" card in the HTML/PDF exports and the dashboard.
+
+It is **derived from the append-only history** (plus the current items and
+clusters) on every request, never stored in the workspace, so it stays auditable
+and old workspaces without any digest fields load unchanged and simply produce a
+zeroed digest. The window defaults to the last 7 days; pass `--since ISO-DATE`
+for an inclusive custom start (an event exactly on `since` is included).
+
+| Field | Meaning |
+| --- | --- |
+| `window_start`, `window_end` | Inclusive window boundaries (ISO-8601) |
+| `since` | The supplied `--since` value, or `""` for the default window |
+| `generated_at`, `days` | When the digest was built and the window length |
+| `total_items`, `new_items` | Items in the workspace and created in the window |
+| `new_clusters`, `discarded_clusters` | Topics created in the window and discarded topics |
+| `decisions`, `decisions_by_action` | Decisions in the window, total and per action |
+| `reviewer_load` | Per reviewer, a count for each action plus `total` |
+| `unreviewed` | Decisions in the window with no reviewer |
+| `untouched_topics` | Topics with no decision in the window |
+| `changed_topics` | Top three clusters by size discarded, restored or renamed |
+
+The CSV export gains `digest_*` columns rendered as a single summary row above
+the existing per-quote rows, and the HTML/PDF exports render the same values as
+a card/section. Reviewer names and notes follow the existing untrusted-input
+handling: HTML-escaped in `report_to_html` and neutralised with `_csv_safe` in
+`report_to_csv`.
 
 ## Container and Kubernetes
 

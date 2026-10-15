@@ -57,6 +57,32 @@ class WebTests(unittest.TestCase):
         self.assertEqual(report["totals"]["items"], 4)
         self.assertGreaterEqual(report["totals"]["clusters"], 2)
 
+    def test_api_digest_returns_json(self):
+        self.import_csv()
+        status, headers, body = self.call("GET", "/api/digest")
+        self.assertTrue(status.startswith("200"))
+        self.assertIn("application/json", headers["Content-Type"])
+        digest = json.loads(body)
+        for key in ("window_start", "window_end", "reviewer_load", "unreviewed"):
+            self.assertIn(key, digest)
+
+    def test_api_digest_on_empty_workspace(self):
+        status, headers, body = self.call("GET", "/api/digest")
+        self.assertTrue(status.startswith("200"))
+        self.assertIn("application/json", headers["Content-Type"])
+        self.assertEqual(json.loads(body)["total_items"], 0)
+
+    def test_api_report_includes_digest(self):
+        self.import_csv()
+        _, _, body = self.call("GET", "/api/report")
+        self.assertIn("digest", json.loads(body))
+
+    def test_dashboard_renders_digest_card(self):
+        self.import_csv()
+        _, _, body = self.call("GET", "/")
+        self.assertIn(b'id="digest"', body)
+        self.assertIn(b"renderDigest", body)
+
     def test_dashboard_renders(self):
         self.import_csv()
         status, headers, body = self.call("GET", "/")

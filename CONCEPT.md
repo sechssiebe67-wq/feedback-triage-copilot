@@ -55,6 +55,14 @@ A weekly, automatically clustered report where each topic carries:
   decision log is exported alongside the report (JSON, CSV, HTML, PDF) and is
   visible on the dashboard, turning the correction history into an auditable
   decision log without authentication or a database.
+- **Weekly digest and reviewer load summary:** a `digest` section (CLI
+  `digest`, `GET /api/digest`, the `digest` key in the JSON report and a "This
+  week" card in the HTML/PDF exports and on the dashboard) summarises each
+  window: total items, new items, new and discarded clusters, per-reviewer
+  counts of each decision type, the number of unreviewed decisions, the topics
+  that received no decision ("untouched topics") and the top three changed or
+  renamed clusters. It is derived from the append-only history, never stored in
+  the workspace, so it stays auditable and old workspaces still load.
 - **Persistence:** single JSON workspace file; works without a database.
 - **Operations:** `/healthz` endpoint, WSGI server, container image and Helm
   chart for the existing k3s / Argo CD setup.
@@ -81,8 +89,11 @@ so it is resource-efficient, easy to test offline and cheap to operate.
 1. Scheduled weekly ingestion jobs and per-source connectors.
 2. Embedding-based similarity as an optional upgrade over TF-IDF.
 3. Multi-language stop-word handling and per-language clustering.
-4. Per-reviewer weekly digest and load balancing across reviewers (follow-up to
-   the reviewer accounts and decision log now shipped).
+4. Per-reviewer weekly digest and load balancing across reviewers — **partially
+   shipped**: the weekly digest and reviewer load summary are now available via
+   the report/CLI/API, so an overloaded reviewer or an unreviewed backlog is
+   visible at a glance; automated routing and balancing of work across
+   reviewers is still open.
 5. Slack/e-mail digest of the weekly report.
 6. Volume-based subscription tiers (99 EUR up to 2,000 items / 299 EUR up to
    10,000 items per workspace).

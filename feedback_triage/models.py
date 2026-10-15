@@ -120,6 +120,41 @@ class EditEvent:
 
 
 @dataclass
+class Digest:
+    """A derived weekly digest of triage activity and reviewer load.
+
+    The digest is never persisted in the workspace: it is rebuilt from the
+    append-only history and the current items/clusters, which keeps it
+    auditable and lets old workspaces (without any digest fields) load
+    unchanged and still produce a zeroed digest.
+    """
+
+    window_start: str
+    window_end: str
+    since: str = ""
+    generated_at: str = field(default_factory=now_iso)
+    days: int = 7
+    total_items: int = 0
+    new_items: int = 0
+    new_clusters: int = 0
+    discarded_clusters: int = 0
+    decisions: int = 0
+    reviewer_load: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    decisions_by_action: Dict[str, int] = field(default_factory=dict)
+    unreviewed: int = 0
+    untouched_topics: List[Dict[str, Any]] = field(default_factory=list)
+    changed_topics: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Digest":
+        known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass
 class Workspace:
     """The complete persisted state of one tenant workspace."""
 

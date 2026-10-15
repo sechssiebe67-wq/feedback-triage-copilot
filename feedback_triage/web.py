@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, unquote
 from .ingest import parse_csv
 from .models import ACTIVE
 from .report import (
+    build_digest,
     build_report,
     report_to_csv,
     report_to_html,
@@ -56,6 +57,8 @@ class FeedbackTriageApp:
             return self._json(200, self._health())
         if path == "/api/report" and method == "GET":
             return self._json(200, build_report(self.store))
+        if path == "/api/digest" and method == "GET":
+            return self._json(200, build_digest(self.store))
         if path == "/api/clusters" and method == "GET":
             clusters = [c.to_dict() for c in self.store.clusters]
             return self._json(200, {"clusters": clusters})
@@ -325,6 +328,7 @@ Reviewer:
 <button onclick="addReviewer()">Add reviewer</button>
 </div>
 <div id="summary" class="card"></div>
+<div id="digest" class="card"></div>
 <div id="clusters"></div>
 <div id="discarded"></div>
 <div id="decisions"></div>
@@ -344,6 +348,13 @@ function esc(s){const d=document.createElement('div');d.textContent=s??'';return
 function attr(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function safeUrl(s){const u=String(s??'').trim();return /^https?:\/\//i.test(u)?u:'';}
 function fmtDist(d){return Object.entries(d).map(([k,v])=>`${esc(k)}: ${v}`).join(', ')||'none';}
+function fmtLoad(load){return Object.keys(load||{}).sort().map(name=>{
+  const counts=load[name];
+  const detail=Object.keys(counts).filter(a=>a!=='total').sort()
+    .map(a=>`${esc(a)} ${counts[a]}`).join(', ')||'no decisions';
+  return `<strong>${esc(name)}</strong> (${detail})`;
+}).join(' &middot; ');}
+function fmtTopics(list){return (list||[]).map(t=>`${esc(t.label)} (${t.size})`).join('; ');}
 function selected(){return Array.from(document.querySelectorAll('.pick:checked')).map(c=>c.value);}
 function selectedItems(){return Array.from(document.querySelectorAll('.pickitem:checked')).map(c=>c.value);}
 function render(){
@@ -386,6 +397,29 @@ function render(){
       else splitCluster(id);
     });
   });
+}
+function renderDigest(){
+  const root=document.getElementById('digest');
+  if(!root)return;
+  const d=REPORT.digest||{};
+  let html=`<h2>This week</h2>`+
+    `<p class="metrics">${esc(d.window_start)} &rarr; ${esc(d.window_end)} &middot; `+
+    `${d.decisions||0} decisions &middot; ${d.unreviewed||0} unreviewed</p>`+
+    `<p class="metrics">${d.total_items||0} items &middot; ${d.new_items||0} new &middot; `+
+    `${d.new_clusters||0} new topics &middot; ${d.discarded_clusters||0} discarded</p>`;
+  const load=d.reviewer_load||{};
+  if(Object.keys(load).length){html+=`<p class="metrics">Reviewer load: ${fmtLoad(load)}</p>`;}
+  const changed=d.changed_topics||[];
+  if(changed.length){
+    html+=`<p class="metrics">Top changed topics: ${fmtTopics(changed)||'none'}</p>`;
+    html+=changed.filter(t=>t.note||t.reviewer).map(t=>
+      `<div class="decision"><strong>${esc(t.label)}</strong>`+
+      `${t.reviewer?` &middot; ${esc(t.reviewer)}`:''}`+
+      `${t.note?`<br>${esc(t.note)}`:''}</div>`).join('');
+  }
+  const untouched=d.untouched_topics||[];
+  if(untouched.length){html+=`<p class="metrics">Untouched topics: ${fmtTopics(untouched)}</p>`;}
+  root.innerHTML=html;
 }
 function renderDiscarded(){
   const root=document.getElementById('discarded');
@@ -460,6 +494,7 @@ function renderDecisions(){
 }
 function doMerge(){mergeSelected();}
 render();
+renderDigest();
 renderDiscarded();
 renderDecisions();
 loadReviewers();

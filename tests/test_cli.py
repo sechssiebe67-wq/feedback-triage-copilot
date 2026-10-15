@@ -106,6 +106,42 @@ class CliTests(unittest.TestCase):
         self.assertIn("Alice", contents)
         self.assertIn("week", contents)
 
+    def test_digest_text_and_json(self):
+        self.run_cli(["reviewer", "add", "Alice"])
+        self.run_cli([
+            "import", self.csv_path, "--source", "support", "--reviewer", "Alice"
+        ])
+        code, out = self.run_cli(["digest"])
+        self.assertEqual(code, 0)
+        self.assertIn("Digest", out)
+        self.assertIn("Alice", out)
+        self.assertIn("Decisions in window", out)
+        self.assertIn("Reviewer load", out)
+
+        import json
+
+        code, out = self.run_cli(["digest", "--format", "json"])
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        for key in ("window_start", "window_end", "reviewer_load", "unreviewed"):
+            self.assertIn(key, data)
+
+    def test_digest_rejects_invalid_since(self):
+        code, _ = self.run_cli(["digest", "--since", "not-a-date"])
+        self.assertEqual(code, 2)
+
+    def test_report_json_includes_digest(self):
+        self.run_cli(["import", self.csv_path])
+        import json
+
+        out_path = os.path.join(self.tmp.name, "digest-report.json")
+        code, _ = self.run_cli(["report", "--format", "json", "--out", out_path])
+        self.assertEqual(code, 0)
+        with open(out_path, encoding="utf-8") as handle:
+            report = json.load(handle)
+        self.assertIn("digest", report)
+        self.assertIn("reviewer_load", report["digest"])
+
     def test_decisions_prints_discard_reviewer_and_note(self):
         from feedback_triage.store import TriageStore
 
