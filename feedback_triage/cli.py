@@ -7,7 +7,13 @@ import sys
 from typing import List, Optional
 
 from .ingest import load_csv_file
-from .report import build_report, report_to_csv, report_to_html, report_to_pdf
+from .report import (
+    build_digest,
+    build_report,
+    report_to_csv,
+    report_to_html,
+    report_to_pdf,
+)
 from .store import TriageStore
 
 
@@ -73,6 +79,13 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_log = sub.add_parser("ingest-log", help="print recent ingestion runs")
     ingest_log.add_argument("--limit", type=int, default=20)
 
+    digest = sub.add_parser("digest", help="weekly digest for one reviewer")
+    digest.add_argument("--reviewer", default="", help="reviewer name or id")
+    digest.add_argument(
+        "--limit", type=int, default=10, help="recent decisions to list"
+    )
+    digest.add_argument("--format", choices=["text", "json"], default="text")
+
     sub.add_parser("history", help="print the correction history")
     sub.add_parser("decisions", help="print the attributed decision log")
     return parser
@@ -96,6 +109,41 @@ def _format_run(run) -> str:
     if run.reviewer:
         line += " reviewer=%s" % run.reviewer
     return line
+
+
+def _format_digest_text(digest) -> str:
+    totals = digest["totals"]
+    lines = [
+        "Weekly digest for %s (generated %s)"
+        % (digest["reviewer"] or "unknown reviewer", digest["generated_at"]),
+        "%d items, %d clusters, %d uncertain"
+        % (totals["items"], totals["clusters"], totals["uncertain_clusters"]),
+        "Assigned to you: %d cluster(s)" % len(digest["assigned"]),
+        "Clusters needing review: %d" % len(digest["needs_review"]),
+    ]
+    for cluster in digest["needs_review"]:
+        flags = ", ".join(cluster["uncertainty"]) or "none"
+        lines.append(
+            "  - %s (%d quotes) [%s]"
+            % (cluster["label"], cluster["size"], flags)
+        )
+    counts = digest["open_uncertainties"]
+    lines.append(
+        "Open uncertainties: " + ", ".join(
+            "%s=%d" % (flag, counts.get(flag, 0))
+            for flag in ("few_evidence", "low_cohesion", "low_separation")
+        )
+    )
+    if digest["recent_decisions"]:
+        lines.append("Recent decisions:")
+        for decision in digest["recent_decisions"]:
+            line = "  - %s %s" % (decision["timestamp"], decision["action"])
+            if decision["clusters"]:
+                line += " [%s]" % ", ".join(decision["clusters"])
+            if decision["note"]:
+                line += ": %s" % decision["note"]
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def _handle_source(store: TriageStore, args) -> int:
@@ -204,6 +252,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         runs = list(store.ingest_runs)[-max(args.limit, 0):]
         for run in runs:
             print(_format_run(run))
+        return 0
+
+    if args.command == "digest":
+        if not args.reviewer:
+            print("No reviewer given. Use --reviewer NAME.")
+            return 2
+        digest = build_digest(store, args.reviewer, limit=args.limit)
+        registered = any(
+            reviewer.id == args.reviewer
+            or reviewer.name.lower() == args.reviewer.lower()
+            for reviewer in store.reviewers
+        )
+        if not registered:
+            print(
+                "Reviewer %r is not registered; showing an empty digest."
+                % args.reviewer
+            )
+        if args.format == "json":
+            import json
+
+            print(json.dumps(digest, ensure_ascii=False, indent=2))
+        else:
+            print(_format_digest_text(digest))
         return 0
 
     if args.command == "history":

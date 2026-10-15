@@ -65,6 +65,15 @@ A weekly, automatically clustered report where each topic carries:
   decision log is exported alongside the report (JSON, CSV, HTML, PDF) and is
   visible on the dashboard, turning the correction history into an auditable
   decision log without authentication or a database.
+- **Per-reviewer weekly digest:** `digest --reviewer NAME` on the CLI,
+  `GET /api/digest?reviewer=NAME` over HTTP and a compact "My digest" card on
+  the dashboard summarise the weekly report for one reviewer: the active
+  clusters whose most recent decision they made, the uncertain clusters still
+  awaiting their decision (sorted by size and number of flags), open
+  uncertainty counts per flag and their recent decisions. The digest is
+  **read-only** — it never modifies the workspace, clusters or history, so it
+  can be generated as often as needed and closes roadmap item 4 without adding
+  a dependency, database or external service.
 - **Persistence:** single JSON workspace file; works without a database.
 - **Operations:** `/healthz` endpoint, WSGI server, container image and Helm
   chart for the existing k3s / Argo CD setup.
@@ -78,8 +87,8 @@ feedback_triage/
   ingest.py    CSV parsing with column auto-detection
   cluster.py   tokenisation, TF-IDF vectors, leader clustering, uncertainty
   store.py     JSON workspace, source registry, ingestion runs, corrections
-  report.py    weekly report aggregation and CSV/HTML/PDF rendering
-  web.py       WSGI application (dashboard, JSON API, exports, health)
+  report.py    weekly report and per-reviewer digest aggregation, CSV/HTML/PDF
+  web.py       WSGI application (dashboard, JSON API, digest, exports, health)
   cli.py       command line entry point
   __main__.py  `python -m feedback_triage`
 ```
@@ -89,15 +98,24 @@ so it is resource-efficient, easy to test offline and cheap to operate.
 
 ## Next direction
 
+Shipped this cycle: the **per-reviewer weekly digest** (roadmap item 4) — the
+read-only `digest` command, `GET /api/digest` and the dashboard "My digest"
+card now show each reviewer the active clusters whose most recent decision they
+made, the uncertain clusters still awaiting their decision, open uncertainty
+counts and their recent decisions.
+
+Remaining follow-ups:
+
 1. Real per-source connectors (support desk, app-store and CRM APIs) that feed
    the source registry without a manual CSV export; the scheduled ingestion
    pipeline, run log and idempotent dedupe shipped here are the foundation. A
    Kubernetes `CronJob` already covers the scheduled part for CSV files.
 2. Embedding-based similarity as an optional upgrade over TF-IDF.
 3. Multi-language stop-word handling and per-language clustering.
-4. Per-reviewer weekly digest and load balancing across reviewers (follow-up to
-   the reviewer accounts and decision log now shipped).
-5. Slack/e-mail digest of the weekly report.
+4. Digest delivery through Slack or e-mail (the in-app, CLI and HTTP digest
+   shipped here is the payload that would be delivered).
+5. Load balancing that assigns clusters across reviewers based on the per-
+   reviewer load the digest now makes visible.
 6. Volume-based subscription tiers (99 EUR up to 2,000 items / 299 EUR up to
    10,000 items per workspace).
 
@@ -115,6 +133,16 @@ audit trail instead of an anonymous edit list. Interviews can reconstruct *why*
 a theme was merged, split or discarded, and disputed prioritisation decisions
 can be traced back to the person and the note that justified them, which makes
 the "defensible prioritisation" promise verifiable rather than aspirational.
+
+The per-reviewer digest makes that prototype measurable per person: it names
+exactly which uncertain clusters still need a decision and how many open
+uncertainty flags remain, so a design partner can see each reviewer's queue and
+confirm whether the weekly report is actually being triaged. Because the digest
+is read-only it can be produced as often as the trial needs without touching
+the audit trail. In the interviews this turns "we read the report each week"
+into a concrete count of clusters resolved per reviewer, which is the evidence
+behind the "halve triage time" and "70% of clusters accepted unchanged"
+success criteria.
 
 ## Platform requirements
 

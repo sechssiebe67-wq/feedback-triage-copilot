@@ -75,6 +75,101 @@ def build_report(
     return report
 
 
+#: Correction actions that assign a cluster to the reviewer who made them.
+DIGEST_DECISION_ACTIONS = ("merge", "split", "discard", "restore", "rename")
+
+#: The uncertainty flags the digest always reports a count for.
+DIGEST_UNCERTAINTY_FLAGS = ("few_evidence", "low_cohesion", "low_separation")
+
+
+def _resolve_reviewer_name(store, value: str) -> str:
+    """Resolve a reviewer id or name to the stored name, else the raw value."""
+    if not value:
+        return ""
+    for reviewer in getattr(store, "reviewers", []):
+        if reviewer.id == value or reviewer.name.lower() == value.lower():
+            return reviewer.name
+    return value
+
+
+def build_digest(
+    store, reviewer_id_or_name: str = "", limit: int = 10
+) -> Dict[str, object]:
+    """Summarise the weekly report for a single reviewer.
+
+    This is a read-only view: it never writes to the workspace or the history.
+    It lists the clusters assigned to the reviewer (where their decision is the
+    most recent one), the uncertain clusters still awaiting a decision from
+    them, per-flag uncertainty counts and their most recent decisions.
+    """
+    raw = (reviewer_id_or_name or "").strip()
+    resolved = _resolve_reviewer_name(store, raw)
+    target = resolved.lower()
+    active = [c for c in store.clusters if c.status == ACTIVE]
+    labels_by_id = {c.id: c.label for c in store.clusters}
+    reviewers_by_id = {r.id: r.name for r in getattr(store, "reviewers", [])}
+
+    latest_by_cluster: Dict[str, str] = {}
+    decided_ids = set()
+    for event in store.history:
+        if event.action not in DIGEST_DECISION_ACTIONS:
+            continue
+        event_reviewer = event.reviewer or ""
+        event_reviewer = reviewers_by_id.get(event_reviewer, event_reviewer)
+        for cluster_id in _affected_cluster_ids(event):
+            latest_by_cluster[cluster_id] = event_reviewer
+            if event_reviewer.lower() == target:
+                decided_ids.add(cluster_id)
+
+    assigned: List[Dict[str, object]] = []
+    needs_review: List[Dict[str, object]] = []
+    open_uncertainties = {flag: 0 for flag in DIGEST_UNCERTAINTY_FLAGS}
+    uncertain_clusters = 0
+    for cluster in active:
+        flags = list(cluster.uncertainty)
+        if flags:
+            uncertain_clusters += 1
+        for flag in flags:
+            open_uncertainties[flag] = open_uncertainties.get(flag, 0) + 1
+        entry = {
+            "id": cluster.id,
+            "label": cluster.label,
+            "size": len(cluster.item_ids),
+            "uncertainty": flags,
+        }
+        latest = latest_by_cluster.get(cluster.id)
+        if latest is not None and latest.lower() == target:
+            assigned.append(entry)
+        if flags and cluster.id not in decided_ids:
+            needs_review.append(entry)
+
+    needs_review.sort(
+        key=lambda entry: (entry["size"], len(entry["uncertainty"])),
+        reverse=True,
+    )
+
+    recent_decisions = [
+        decision
+        for decision in _decision_log(store.history, reviewers_by_id, labels_by_id)
+        if decision["action"] in DIGEST_DECISION_ACTIONS
+        and (decision["reviewer"] or "").lower() == target
+    ][: max(int(limit), 0)]
+
+    return {
+        "reviewer": resolved,
+        "generated_at": _now(),
+        "assigned": assigned,
+        "needs_review": needs_review,
+        "open_uncertainties": open_uncertainties,
+        "recent_decisions": recent_decisions,
+        "totals": {
+            "items": len(store.items),
+            "clusters": len(active),
+            "uncertain_clusters": uncertain_clusters,
+        },
+    }
+
+
 def _decision_log(
     history: Sequence[EditEvent],
     reviewers_by_id: Dict[str, str],
@@ -98,9 +193,8 @@ def _decision_log(
     return decisions
 
 
-def _affected_labels(
-    event: EditEvent, labels_by_id: Dict[str, str]
-) -> List[str]:
+def _affected_cluster_ids(event: EditEvent) -> List[str]:
+    """Return the cluster ids a correction touched, in details order."""
     details = event.details or {}
     cluster_ids: List[str] = []
     if details.get("cluster_id"):
@@ -109,13 +203,19 @@ def _affected_labels(
         cluster_ids.append(str(details["source"]))
     for source_id in details.get("sources", []) or []:
         cluster_ids.append(str(source_id))
+    return cluster_ids
+
+
+def _affected_labels(
+    event: EditEvent, labels_by_id: Dict[str, str]
+) -> List[str]:
     labels: List[str] = []
-    for cluster_id in cluster_ids:
+    for cluster_id in _affected_cluster_ids(event):
         label = labels_by_id.get(cluster_id)
         if label and label not in labels:
             labels.append(label)
     if event.action == "rename":
-        new_label = details.get("to")
+        new_label = (event.details or {}).get("to")
         if new_label and new_label not in labels:
             labels.append(str(new_label))
     return labels

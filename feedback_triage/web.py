@@ -6,6 +6,7 @@ Runs on the standard library only, so it can be served directly with
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from typing import Dict, Iterable, Tuple
@@ -14,6 +15,7 @@ from urllib.parse import parse_qs, unquote
 from .ingest import parse_csv
 from .models import ACTIVE
 from .report import (
+    build_digest,
     build_report,
     report_to_csv,
     report_to_html,
@@ -52,9 +54,23 @@ class FeedbackTriageApp:
         self, method: str, path: str, environ: Dict[str, object]
     ) -> Tuple[str, Dict[str, str], object]:
         if path == "/" and method == "GET":
-            return self._html(200, self._dashboard())
+            query = parse_qs(str(environ.get("QUERY_STRING", "")))
+            reviewer = (query.get("reviewer") or [""])[0].strip()
+            return self._html(200, self._dashboard(reviewer))
         if path == "/healthz" and method == "GET":
             return self._json(200, self._health())
+        if path == "/api/digest" and method == "GET":
+            query = parse_qs(str(environ.get("QUERY_STRING", "")))
+            reviewer = (query.get("reviewer") or [""])[0].strip()
+            if not reviewer:
+                return self._json(400, {"error": "reviewer is required"})
+            try:
+                limit = int((query.get("limit") or ["10"])[0])
+            except ValueError:
+                limit = 10
+            return self._json(
+                200, build_digest(self.store, reviewer, limit=limit)
+            )
         if path == "/api/report" and method == "GET":
             return self._json(200, build_report(self.store))
         if path == "/api/clusters" and method == "GET":
@@ -300,7 +316,7 @@ class FeedbackTriageApp:
             text.encode("utf-8"),
         )
 
-    def _dashboard(self) -> str:
+    def _dashboard(self, reviewer: str = "") -> str:
         report = build_report(self.store)
         discarded = [
             {"id": c.id, "label": c.label, "size": len(c.item_ids)}
@@ -309,15 +325,19 @@ class FeedbackTriageApp:
         ]
         sources = [s.to_dict() for s in self.store.list_sources()]
         ingest_runs = [r.to_dict() for r in self.store.ingest_runs][-10:]
+        digest = build_digest(self.store, reviewer) if reviewer else None
         values = {
             "__REPORT__": _json_for_script(report),
             "__DISCARDED__": _json_for_script(discarded),
             "__SOURCES__": _json_for_script(sources),
             "__INGEST_RUNS__": _json_for_script(ingest_runs),
+            "__SELECTED_REVIEWER__": _json_for_script(reviewer),
+            "__DIGEST__": _digest_card(digest, reviewer),
             "__CONTROLS__": _controls_script(),
         }
         return re.sub(
-            "__REPORT__|__DISCARDED__|__SOURCES__|__INGEST_RUNS__|__CONTROLS__",
+            "__REPORT__|__DISCARDED__|__SOURCES__|__INGEST_RUNS__"
+            "|__SELECTED_REVIEWER__|__DIGEST__|__CONTROLS__",
             lambda match: values[match.group(0)],
             DASHBOARD_TEMPLATE,
         )
@@ -340,6 +360,73 @@ def _json_for_script(payload: object) -> str:
         .replace("\u2028", "\\u2028")
         .replace("\u2029", "\\u2029")
     )
+
+
+def _digest_card(digest, reviewer: str) -> str:
+    """Render the compact read-only "My digest" card for one reviewer.
+
+    Every untrusted value (reviewer name, cluster labels, notes) is escaped
+    before it reaches the HTML, so a reviewer named ``<b>Eve</b>`` cannot inject
+    markup.
+    """
+    if not reviewer or digest is None:
+        return (
+            '<section class="card"><h2>My digest</h2>'
+            '<p class="empty">Select a reviewer to see their weekly digest.</p>'
+            "</section>"
+        )
+
+    def e(value: object) -> str:
+        return html.escape("" if value is None else str(value))
+
+    totals = digest["totals"]
+    counts = digest["open_uncertainties"]
+    parts = [
+        '<section class="card">',
+        "<h2>My digest</h2>",
+        '<p class="metrics">Reviewer: <strong>%s</strong> &middot; generated %s</p>'
+        % (e(digest["reviewer"]), e(digest["generated_at"])),
+        '<p class="metrics">%d items &middot; %d topics &middot; '
+        "%d clusters need review &middot; %d uncertain</p>"
+        % (
+            totals["items"], totals["clusters"],
+            len(digest["needs_review"]), totals["uncertain_clusters"],
+        ),
+        '<p class="metrics">Open uncertainties: few_evidence %d &middot; '
+        "low_cohesion %d &middot; low_separation %d</p>"
+        % (
+            counts.get("few_evidence", 0),
+            counts.get("low_cohesion", 0),
+            counts.get("low_separation", 0),
+        ),
+    ]
+    if digest["needs_review"]:
+        for cluster in digest["needs_review"]:
+            flags = "".join(
+                '<span class="flag">%s</span>' % e(flag)
+                for flag in cluster["uncertainty"]
+            )
+            parts.append(
+                '<p class="metrics">%s %s (%d quotes)</p>'
+                % (flags, e(cluster["label"]), cluster["size"])
+            )
+    else:
+        parts.append(
+            '<p class="empty">No uncertain clusters need your review.</p>'
+        )
+    if digest["recent_decisions"]:
+        parts.append("<h2>Recent decisions</h2>")
+        for decision in digest["recent_decisions"]:
+            clusters = decision.get("clusters") or []
+            cluster_line = " [%s]" % e(", ".join(clusters)) if clusters else ""
+            note = decision.get("note") or ""
+            note_line = " &mdash; %s" % e(note) if note else ""
+            parts.append(
+                '<p class="metrics"><strong>%s</strong>%s%s</p>'
+                % (e(decision.get("action")), cluster_line, note_line)
+            )
+    parts.append("</section>")
+    return "".join(parts)
 
 
 def _status_text(status: int) -> str:
@@ -401,11 +488,13 @@ a{color:#2563eb;word-break:break-all}
 </label>
 <label style="display:flex;align-items:center;gap:6px">
 Reviewer:
-<select id="reviewer-select" title="Reviewer for your decisions"></select>
+<select id="reviewer-select" title="Reviewer for your decisions"
+        onchange="selectReviewer()"></select>
 </label>
 <button onclick="addReviewer()">Add reviewer</button>
 </div>
 <div id="summary" class="card"></div>
+<div id="digest">__DIGEST__</div>
 <div id="sources"></div>
 <div id="ingest-runs"></div>
 <div id="clusters"></div>
@@ -417,6 +506,7 @@ const REPORT = __REPORT__;
 const DISCARDED = __DISCARDED__;
 const SOURCES = __SOURCES__;
 const INGEST_RUNS = __INGEST_RUNS__;
+const SELECTED_REVIEWER = __SELECTED_REVIEWER__;
 __CONTROLS__
 </script>
 </body></html>
@@ -503,7 +593,15 @@ async function loadReviewers(){
     if(r.ok){reviewers=(await r.json()).reviewers||[];}}catch(e){}
   sel.innerHTML='<option value="">(no reviewer)</option>'+
     reviewers.map(v=>`<option value="${attr(v.id)}">${esc(v.name)}</option>`).join('');
-  if(previous)sel.value=previous;
+  if(SELECTED_REVIEWER){
+    const match=Array.from(sel.options).find(o=>o.value===SELECTED_REVIEWER||o.textContent===SELECTED_REVIEWER);
+    if(match)sel.value=match.value;
+  } else if(previous){sel.value=previous;}
+}
+function selectReviewer(){
+  const sel=document.getElementById('reviewer-select');
+  const value=sel?sel.value:'';
+  window.location=value?('/?reviewer='+encodeURIComponent(value)):'/';
 }
 function currentReviewer(){const sel=document.getElementById('reviewer-select');return sel?sel.value:'';}
 function optionalNote(message){const value=prompt(message);return value?value:'';}

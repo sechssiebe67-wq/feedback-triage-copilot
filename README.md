@@ -48,6 +48,7 @@ they can be restored.
 | `report --format {csv,html,pdf,json} [--out FILE] [--reviewer NAME] [--note TEXT]` | Export the weekly report |
 | `reviewer add <name>` | Add a reviewer account |
 | `reviewer list` | List reviewer accounts |
+| `digest --reviewer NAME [--limit N] [--format {text,json}]` | Weekly digest for one reviewer |
 | `history` | Print the raw correction history |
 | `decisions` | Print the attributed decision log |
 | `serve [--host H] [--port P]` | Run the web application |
@@ -130,6 +131,7 @@ delimiter (`,`, `;`, tab, `|`) is sniffed automatically.
 | GET | `/` | HTML dashboard |
 | GET | `/healthz` | Health probe (items, clusters) |
 | GET | `/api/report` | Weekly report as JSON |
+| GET | `/api/digest?reviewer=NAME&limit=N` | Read-only weekly digest for one reviewer (400 when `reviewer` is missing) |
 | GET | `/api/clusters`, `/api/items`, `/api/history` | Raw data |
 | GET | `/api/reviewers` | List reviewer accounts |
 | POST | `/api/reviewers` | `{"name": "Alice"}` |
@@ -165,6 +167,24 @@ CSV exports render the same log, escaping untrusted reviewer names and notes
 and neutralising formula-leading cells. Workspaces created before reviewer
 attribution load unchanged: missing `reviewers` and `reviewer`/`note` fields
 default to empty.
+
+## Per-reviewer weekly digest
+
+The `digest` command summarises the weekly report for one named reviewer
+(a reviewer name or id): the clusters whose latest decision they made, the
+uncertain clusters still awaiting their decision, the count of open
+uncertainties per flag, and their most recent decisions. It is **read-only**:
+running it never modifies the workspace or the history.
+
+```sh
+python3 -m feedback_triage --workspace workspace.json digest --reviewer Alice
+python3 -m feedback_triage --workspace workspace.json digest --reviewer Alice --format json
+```
+
+The same view is available over HTTP as
+`GET /api/digest?reviewer=Alice&limit=10` (a missing `reviewer` returns HTTP
+400) and on the dashboard as a compact "My digest" card: choosing a reviewer in
+the toolbar reloads `/?reviewer=Alice` and renders that reviewer's digest.
 
 ## Container and Kubernetes
 
