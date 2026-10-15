@@ -16,7 +16,10 @@ from .cluster import cluster_items
 from .ingest import load_csv_file
 from .models import (
     ACTIVE,
+    CLAIMED,
     DISCARDED,
+    RESOLVED,
+    Claim,
     Cluster,
     EditEvent,
     FeedbackItem,
@@ -82,6 +85,10 @@ class TriageStore:
     @property
     def ingest_runs(self) -> List[IngestRun]:
         return self.workspace.ingest_runs
+
+    @property
+    def claims(self) -> List[Claim]:
+        return self.workspace.claims
 
     def items_by_id(self) -> Dict[str, FeedbackItem]:
         return {item.id: item for item in self.workspace.items}
@@ -497,6 +504,136 @@ class TriageStore:
         )
         self.save()
         return cluster
+
+    # -- review queue ----------------------------------------------------
+    def claim_for(self, cluster_id: str) -> Optional[Claim]:
+        """Return the active (``claimed``) claim for a cluster, else ``None``."""
+        for claim in self.workspace.claims:
+            if claim.cluster_id == cluster_id and claim.status == CLAIMED:
+                return claim
+        return None
+
+    def list_claims(self, status: Optional[str] = None) -> List[Claim]:
+        """Return all claims, optionally filtered by ``status``."""
+        claims = list(self.workspace.claims)
+        if status is not None:
+            claims = [c for c in claims if c.status == status]
+        return claims
+
+    def claim_cluster(
+        self, cluster_id: str, reviewer: str, note: str = "", force: bool = False
+    ) -> Claim:
+        """Claim a cluster for a reviewer.
+
+        Idempotent for the current claimant: claiming again returns the existing
+        claim and writes no event. Claiming a cluster already held by a different
+        reviewer raises :class:`ValueError` unless ``force`` reassigns it.
+        """
+        self.get_cluster(cluster_id)
+        reviewer = (reviewer or "").strip()
+        if not reviewer:
+            raise ValueError("reviewer is required to claim a cluster")
+        existing = self.claim_for(cluster_id)
+        if existing is not None:
+            if existing.reviewer.lower() == reviewer.lower():
+                return existing
+            if not force:
+                raise ValueError(
+                    "cluster %s is already claimed by %s"
+                    % (cluster_id, existing.reviewer)
+                )
+            previous = existing.reviewer
+            existing.reviewer = reviewer
+            existing.note = note or ""
+            existing.status = CLAIMED
+            existing.claimed_at = now_iso()
+            existing.updated_at = existing.claimed_at
+            self._record(
+                "claim",
+                {"cluster_id": cluster_id, "previous_reviewer": previous,
+                 "forced": True},
+                reviewer=reviewer,
+                note=note,
+            )
+            self.save()
+            return existing
+        claim = Claim(
+            id="cl" + uuid.uuid4().hex[:10],
+            cluster_id=cluster_id,
+            reviewer=reviewer,
+            status=CLAIMED,
+            note=note or "",
+        )
+        self.workspace.claims.append(claim)
+        self._record(
+            "claim", {"cluster_id": cluster_id}, reviewer=reviewer, note=note
+        )
+        self.save()
+        return claim
+
+    def release_cluster(self, cluster_id: str, reviewer: str = "") -> Claim:
+        """Release an active claim back to the queue.
+
+        Only the current claimant (or an empty reviewer) may release; anyone else
+        raises :class:`ValueError`. The claim is removed from the workspace and a
+        ``release`` event is appended.
+        """
+        self.get_cluster(cluster_id)
+        active = self.claim_for(cluster_id)
+        if active is None:
+            raise ValueError("cluster %s has no active claim" % cluster_id)
+        reviewer = (reviewer or "").strip()
+        if reviewer and active.reviewer.lower() != reviewer.lower():
+            raise ValueError(
+                "cluster %s is claimed by %s, not %s"
+                % (cluster_id, active.reviewer, reviewer)
+            )
+        self.workspace.claims = [
+            c for c in self.workspace.claims
+            if not (c.cluster_id == cluster_id and c.status == CLAIMED)
+        ]
+        self._record(
+            "release",
+            {"cluster_id": cluster_id, "previous_reviewer": active.reviewer},
+            reviewer=reviewer or active.reviewer,
+        )
+        self.save()
+        return active
+
+    def resolve_cluster(
+        self, cluster_id: str, reviewer: str, note: str = ""
+    ) -> Claim:
+        """Resolve a cluster, clearing it from the active queue.
+
+        The claim is marked ``resolved`` (and kept for the decision log) and
+        exactly one ``resolve`` event is appended. Resolving an unclaimed cluster
+        records a resolved claim so the queue and the report stay consistent.
+        """
+        self.get_cluster(cluster_id)
+        reviewer = (reviewer or "").strip()
+        if not reviewer:
+            raise ValueError("reviewer is required to resolve a cluster")
+        active = self.claim_for(cluster_id)
+        if active is None:
+            claim = Claim(
+                id="cl" + uuid.uuid4().hex[:10],
+                cluster_id=cluster_id,
+                reviewer=reviewer,
+                status=RESOLVED,
+                note=note or "",
+            )
+            self.workspace.claims.append(claim)
+        else:
+            claim = active
+            claim.status = RESOLVED
+            claim.updated_at = now_iso()
+            if note:
+                claim.note = note
+        self._record(
+            "resolve", {"cluster_id": cluster_id}, reviewer=reviewer, note=note
+        )
+        self.save()
+        return claim
 
     # -- helpers ---------------------------------------------------------
     def _record(

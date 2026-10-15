@@ -14,6 +14,9 @@ from typing import Any, Dict, List, Optional
 ACTIVE = "active"
 DISCARDED = "discarded"
 
+CLAIMED = "claimed"
+RESOLVED = "resolved"
+
 
 def now_iso() -> str:
     """Return the current UTC time as an ISO-8601 string."""
@@ -181,6 +184,34 @@ class IngestRun:
 
 
 @dataclass
+class Claim:
+    """A reviewer's ownership of one uncertain cluster.
+
+    Claims are the database-free review queue: a reviewer *claims* a cluster
+    (``status == "claimed"``) so teammates can see it is taken, then *resolves*
+    it (``status == "resolved"``) or *releases* it back to the queue. A released
+    claim is removed from the workspace; a resolved claim is kept so the decision
+    log and the "clusters resolved per reviewer" metric stay complete.
+    """
+
+    id: str
+    cluster_id: str
+    reviewer: str
+    status: str = CLAIMED
+    claimed_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+    note: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Claim":
+        known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass
 class Workspace:
     """The complete persisted state of one tenant workspace."""
 
@@ -190,6 +221,7 @@ class Workspace:
     reviewers: List[Reviewer] = field(default_factory=list)
     sources: List[SourceConfig] = field(default_factory=list)
     ingest_runs: List[IngestRun] = field(default_factory=list)
+    claims: List[Claim] = field(default_factory=list)
     version: int = 1
     settings: Dict[str, Any] = field(
         default_factory=lambda: {
@@ -208,6 +240,7 @@ class Workspace:
             "reviewers": [r.to_dict() for r in self.reviewers],
             "sources": [s.to_dict() for s in self.sources],
             "ingest_runs": [r.to_dict() for r in self.ingest_runs],
+            "claims": [c.to_dict() for c in self.claims],
         }
 
     @classmethod
@@ -221,6 +254,7 @@ class Workspace:
             ingest_runs=[
                 IngestRun.from_dict(r) for r in data.get("ingest_runs", [])
             ],
+            claims=[Claim.from_dict(c) for c in data.get("claims", [])],
             version=int(data.get("version", 1)),
             settings=data.get("settings")
             or {"similarity_threshold": 0.14, "min_support": 2},

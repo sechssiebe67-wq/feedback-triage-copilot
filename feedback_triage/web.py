@@ -9,13 +9,14 @@ from __future__ import annotations
 import html
 import json
 import re
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, List, Tuple
 from urllib.parse import parse_qs, unquote
 
 from .ingest import parse_csv
 from .models import ACTIVE
 from .report import (
     build_digest,
+    build_queue,
     build_report,
     report_to_csv,
     report_to_html,
@@ -24,7 +25,9 @@ from .report import (
 from .store import TriageStore
 
 
-CLUSTER_ACTION = re.compile(r"^/api/clusters/([^/]+)/(discard|restore|rename|split)$")
+CLUSTER_ACTION = re.compile(
+    r"^/api/clusters/([^/]+)/(discard|restore|rename|split|claim|release|resolve)$"
+)
 SOURCE_ACTION = re.compile(r"^/api/sources/([^/]+)/(enable|disable|run)$")
 
 
@@ -71,6 +74,12 @@ class FeedbackTriageApp:
             return self._json(
                 200, build_digest(self.store, reviewer, limit=limit)
             )
+        if path == "/api/queue" and method == "GET":
+            query = parse_qs(str(environ.get("QUERY_STRING", "")))
+            reviewer = (query.get("reviewer") or [""])[0].strip()
+            if not reviewer:
+                return self._json(400, {"error": "reviewer is required"})
+            return self._json(200, build_queue(self.store, reviewer))
         if path == "/api/report" and method == "GET":
             return self._json(200, build_report(self.store))
         if path == "/api/clusters" and method == "GET":
@@ -253,6 +262,22 @@ class FeedbackTriageApp:
         payload = self._payload(environ)
         reviewer = str(payload.get("reviewer", "") or "")
         note = str(payload.get("note", "") or "")
+        if action == "claim":
+            force = payload.get("force", False)
+            if isinstance(force, str):
+                force = force.strip().lower() in ("true", "1", "yes", "on")
+            claim = self.store.claim_cluster(
+                cluster_id, reviewer, note=note, force=bool(force)
+            )
+            return self._json(200, {"ok": True, "claim": claim.to_dict()})
+        if action == "release":
+            claim = self.store.release_cluster(cluster_id, reviewer)
+            return self._json(200, {"ok": True, "claim": claim.to_dict()})
+        if action == "resolve":
+            claim = self.store.resolve_cluster(cluster_id, reviewer, note=note)
+            return self._json(
+                200, {"ok": True, "claim": claim.to_dict() if claim else None}
+            )
         if action == "discard":
             self.store.discard(cluster_id, reviewer=reviewer, note=note)
         elif action == "restore":
@@ -326,6 +351,7 @@ class FeedbackTriageApp:
         sources = [s.to_dict() for s in self.store.list_sources()]
         ingest_runs = [r.to_dict() for r in self.store.ingest_runs][-10:]
         digest = build_digest(self.store, reviewer) if reviewer else None
+        queue = build_queue(self.store, reviewer) if reviewer else None
         values = {
             "__REPORT__": _json_for_script(report),
             "__DISCARDED__": _json_for_script(discarded),
@@ -333,11 +359,12 @@ class FeedbackTriageApp:
             "__INGEST_RUNS__": _json_for_script(ingest_runs),
             "__SELECTED_REVIEWER__": _json_for_script(reviewer),
             "__DIGEST__": _digest_card(digest, reviewer),
+            "__QUEUE__": _queue_card(queue, reviewer),
             "__CONTROLS__": _controls_script(),
         }
         return re.sub(
             "__REPORT__|__DISCARDED__|__SOURCES__|__INGEST_RUNS__"
-            "|__SELECTED_REVIEWER__|__DIGEST__|__CONTROLS__",
+            "|__SELECTED_REVIEWER__|__DIGEST__|__QUEUE__|__CONTROLS__",
             lambda match: values[match.group(0)],
             DASHBOARD_TEMPLATE,
         )
@@ -399,6 +426,11 @@ def _digest_card(digest, reviewer: str) -> str:
             counts.get("low_cohesion", 0),
             counts.get("low_separation", 0),
         ),
+        '<p class="metrics">Claimed by you: %d &middot; unclaimed backlog: %d</p>'
+        % (
+            len(digest.get("claimed_by_me", [])),
+            len(digest.get("unclaimed", [])),
+        ),
     ]
     if digest["needs_review"]:
         for cluster in digest["needs_review"]:
@@ -425,6 +457,91 @@ def _digest_card(digest, reviewer: str) -> str:
                 '<p class="metrics"><strong>%s</strong>%s%s</p>'
                 % (e(decision.get("action")), cluster_line, note_line)
             )
+    parts.append("</section>")
+    return "".join(parts)
+
+
+def _queue_card(queue, reviewer: str) -> str:
+    """Render the "Review queue" card with claim/release/resolve controls.
+
+    Every untrusted value (reviewer, cluster label, note) is escaped. The card
+    degrades gracefully when no reviewer is selected or the queue is empty.
+    """
+    if not reviewer or queue is None:
+        return (
+            '<section class="card"><h2>Review queue</h2>'
+            '<p class="empty">Select a reviewer to see the review queue.</p>'
+            "</section>"
+        )
+
+    def e(value: object) -> str:
+        return html.escape("" if value is None else str(value))
+
+    def buttons(entry: dict, mine: bool, other: bool) -> str:
+        cid = e(entry["id"])
+        out = ""
+        if mine:
+            out += (
+                '<button onclick="releaseCluster(\'%s\')">Release</button> '
+                '<button onclick="resolveCluster(\'%s\')">Resolve</button>'
+                % (cid, cid)
+            )
+        elif other:
+            out += (
+                '<button onclick="forceClaimCluster(\'%s\')">Take over</button>'
+                % cid
+            )
+        else:
+            out += '<button onclick="claimCluster(\'%s\')">Claim</button>' % cid
+        return out
+
+    def block(title: str, entries, mine=False, other=False, empty=None) -> List[str]:
+        lines = ["<h2>%s (%d)</h2>" % (e(title), len(entries))]
+        if not entries and empty:
+            lines.append('<p class="empty">%s</p>' % e(empty))
+        for entry in entries:
+            flags = "".join(
+                '<span class="flag">%s</span>' % e(flag)
+                for flag in entry["uncertainty"]
+            )
+            claim_line = ""
+            if entry["claim_reviewer"]:
+                claim_line = " &middot; claimed by %s" % e(entry["claim_reviewer"])
+                if entry["claim_note"]:
+                    claim_line += " (%s)" % e(entry["claim_note"])
+            lines.append(
+                '<p class="metrics">%s %s (%d quotes)%s</p><p>%s</p>'
+                % (
+                    flags, e(entry["label"]), entry["size"],
+                    claim_line, buttons(entry, mine, other),
+                )
+            )
+        return lines
+
+    parts = [
+        '<section class="card">',
+        "<h2>Review queue</h2>",
+        '<p class="metrics">Reviewer: <strong>%s</strong> &middot; '
+        "mine %d &middot; others %d &middot; unclaimed %d</p>"
+        % (
+            e(queue["reviewer"]),
+            len(queue["claimed_by_me"]),
+            len(queue["claimed_by_others"]),
+            len(queue["unclaimed"]),
+        ),
+    ]
+    parts.extend(block(
+        "Claimed by you", queue["claimed_by_me"], mine=True,
+        empty="You have not claimed any clusters.",
+    ))
+    parts.extend(block(
+        "Claimed by others", queue["claimed_by_others"], other=True,
+        empty="No clusters are claimed by others.",
+    ))
+    parts.extend(block(
+        "Unclaimed", queue["unclaimed"],
+        empty="No unclaimed clusters. Nice work.",
+    ))
     parts.append("</section>")
     return "".join(parts)
 
@@ -495,6 +612,7 @@ Reviewer:
 </div>
 <div id="summary" class="card"></div>
 <div id="digest">__DIGEST__</div>
+<div id="queue">__QUEUE__</div>
 <div id="sources"></div>
 <div id="ingest-runs"></div>
 <div id="clusters"></div>
@@ -612,6 +730,13 @@ async function addReviewer(){const name=prompt('Reviewer name');if(!name)return;
 async function mergeSelected(){const ids=selected();if(ids.length<2){alert('Select at least two clusters.');return;}
   const note=optionalNote('Optional note for this merge');
   if(await post('/api/merge',withReviewer({cluster_ids:ids,note}))location.reload();}
+async function claimCluster(id){const note=optionalNote('Optional note for claiming this cluster');
+  if(await post(`/api/clusters/${id}/claim`,withReviewer({note})))location.reload();}
+async function forceClaimCluster(id){const note=optionalNote('Optional note for taking over this cluster');
+  if(await post(`/api/clusters/${id}/claim`,withReviewer({note,force:true})))location.reload();}
+async function releaseCluster(id){if(await post(`/api/clusters/${id}/release`,withReviewer({})))location.reload();}
+async function resolveCluster(id){const note=optionalNote('Optional note for resolving this cluster');
+  if(await post(`/api/clusters/${id}/resolve`,withReviewer({note})))location.reload();}
 async function discardCluster(id){const note=optionalNote('Optional note for discarding this cluster');
   if(await post(`/api/clusters/${id}/discard`,withReviewer({note})))location.reload();}
 async function restoreCluster(id){if(await post(`/api/clusters/${id}/restore`,withReviewer({})))location.reload();}
