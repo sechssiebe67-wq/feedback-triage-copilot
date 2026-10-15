@@ -1,0 +1,6 @@
+apiVersion: v2
+name: feedback-triage
+description: Evidence-backed weekly feedback triage copilot
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

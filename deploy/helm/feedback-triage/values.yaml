@@ -1,0 +1,32 @@
+replicaCount: 1
+
+image:
+  repository: feedback-triage-copilot
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  className: nginx
+  host: feedback-triage.local
+  path: /
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+
+healthPath: /healthz

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feedback-triage-copilot"
+version = "0.1.0"
+description = "Evidence-backed weekly feedback triage for small product teams"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Feedback Triage Copilot" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Office/Business",
+]
+
+[project.scripts]
+feedback-triage = "feedback_triage.cli:main"
+
+[tool.setuptools]
+packages = ["feedback_triage"]
