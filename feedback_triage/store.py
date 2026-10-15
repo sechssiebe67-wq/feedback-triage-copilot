@@ -6,19 +6,23 @@ atomic (temp file + rename) so a crash cannot corrupt the workspace.
 
 from __future__ import annotations
 
+import glob as glob_module
 import json
 import os
 import uuid
 from typing import Dict, List, Optional, Sequence
 
 from .cluster import cluster_items
+from .ingest import load_csv_file
 from .models import (
     ACTIVE,
     DISCARDED,
     Cluster,
     EditEvent,
     FeedbackItem,
+    IngestRun,
     Reviewer,
+    SourceConfig,
     Workspace,
     now_iso,
 )
@@ -71,6 +75,14 @@ class TriageStore:
     def reviewers(self) -> List[Reviewer]:
         return self.workspace.reviewers
 
+    @property
+    def sources(self) -> List[SourceConfig]:
+        return self.workspace.sources
+
+    @property
+    def ingest_runs(self) -> List[IngestRun]:
+        return self.workspace.ingest_runs
+
     def items_by_id(self) -> Dict[str, FeedbackItem]:
         return {item.id: item for item in self.workspace.items}
 
@@ -113,6 +125,205 @@ class TriageStore:
             if reviewer.id == value:
                 return reviewer.name
         return value
+
+    # -- sources ---------------------------------------------------------
+    def add_source(
+        self,
+        name: str,
+        path: str,
+        glob: str = "",
+        source_label: str = "",
+        segment_default: str = "",
+        enabled: bool = True,
+    ) -> SourceConfig:
+        """Register a named source and return it.
+
+        ``name`` and ``path`` are required; the path may point at a single file
+        or a directory. ``source_label`` defaults to the source name and is used
+        as the feedback item ``source`` when a CSV row does not provide one.
+        """
+        cleaned_name = (name or "").strip()
+        if not cleaned_name:
+            raise ValueError("source name is required")
+        cleaned_path = (path or "").strip()
+        if not cleaned_path:
+            raise ValueError("source path is required")
+        source = SourceConfig(
+            id="src" + uuid.uuid4().hex[:10],
+            name=cleaned_name,
+            path=cleaned_path,
+            glob=(glob or "").strip(),
+            source_label=(source_label or "").strip() or cleaned_name,
+            segment_default=(segment_default or "").strip(),
+            enabled=bool(enabled),
+        )
+        self.workspace.sources.append(source)
+        self.save()
+        return source
+
+    def list_sources(self) -> List[SourceConfig]:
+        return list(self.workspace.sources)
+
+    def get_source(self, source_id: str) -> SourceConfig:
+        for source in self.workspace.sources:
+            if source.id == source_id:
+                return source
+        raise KeyError("Unknown source: %s" % source_id)
+
+    def set_source_enabled(self, source_id: str, enabled: bool) -> SourceConfig:
+        source = self.get_source(source_id)
+        source.enabled = bool(enabled)
+        self.save()
+        return source
+
+    def remove_source(self, source_id: str) -> SourceConfig:
+        source = self.get_source(source_id)
+        self.workspace.sources.remove(source)
+        self.save()
+        return source
+
+    def _resolve_source_files(self, source: SourceConfig) -> List[str]:
+        """Return the files a source resolves to, honouring dir + glob.
+
+        A directory is searched recursively; without an explicit glob only
+        ``*.csv`` files are picked up. A missing path (or a glob with no
+        matches) raises :class:`ValueError` so callers can report a bad source
+        instead of silently ingesting nothing.
+        """
+        path = source.path
+        pattern = source.glob or ""
+        if os.path.isdir(path):
+            if pattern:
+                matches = glob_module.glob(
+                    os.path.join(path, "**", pattern), recursive=True
+                )
+            else:
+                matches = glob_module.glob(
+                    os.path.join(path, "**", "*.csv"), recursive=True
+                )
+            return sorted(m for m in matches if os.path.isfile(m))
+        if os.path.isfile(path):
+            return [path]
+        if any(char in path for char in "*?["):
+            matches = glob_module.glob(path, recursive=True)
+            return sorted(m for m in matches if os.path.isfile(m))
+        raise ValueError("source path not found: %s" % path)
+
+    def run_source(
+        self, source_id: str, reviewer: str = "", note: str = ""
+    ) -> IngestRun:
+        """Run one source and append exactly one :class:`IngestRun`.
+
+        Items already present in the workspace are skipped, so running the same
+        files twice never duplicates data. A file that fails to parse is
+        recorded as an error entry and the remaining files still run.
+        """
+        source = self.get_source(source_id)
+        files = self._resolve_source_files(source)
+        existing = {item.id for item in self.workspace.items}
+        file_names: List[str] = []
+        errors: List[Dict[str, str]] = []
+        added = 0
+        skipped = 0
+        for file_path in files:
+            file_name = os.path.basename(file_path)
+            file_names.append(file_name)
+            try:
+                items = load_csv_file(file_path, source=source.source_label)
+            except Exception as exc:  # per-file isolation
+                errors.append({"file": file_name, "error": str(exc)})
+                continue
+            for item in items:
+                if source.segment_default and item.segment in ("", "unknown"):
+                    item.segment = source.segment_default
+                if item.id in existing:
+                    skipped += 1
+                    continue
+                self.workspace.items.append(item)
+                existing.add(item.id)
+                added += 1
+        run = IngestRun(
+            id="run" + uuid.uuid4().hex[:10],
+            timestamp=now_iso(),
+            source_id=source.id,
+            source_name=source.name,
+            files=file_names,
+            added=added,
+            skipped=skipped,
+            errors=errors,
+            reviewer=reviewer or "",
+            note=note or "",
+        )
+        self.workspace.ingest_runs.append(run)
+        source.last_run_at = run.timestamp
+        source.last_added = added
+        source.last_skipped = skipped
+        self._record(
+            "ingest",
+            {
+                "source_id": source.id,
+                "source_name": source.name,
+                "files": file_names,
+                "added": added,
+                "skipped": skipped,
+                "errors": len(errors),
+            },
+            reviewer=reviewer,
+            note=note,
+        )
+        if added:
+            self.recluster(record=False)
+        self.save()
+        return run
+
+    def run_all_sources(
+        self, reviewer: str = "", note: str = ""
+    ) -> List[IngestRun]:
+        """Run every enabled source, isolating per-source failures.
+
+        A source whose path is missing is recorded as a failed run (with an
+        error entry) while the remaining sources still run, so a scheduled job
+        produces a complete log and exits successfully.
+        """
+        runs: List[IngestRun] = []
+        for source in list(self.workspace.sources):
+            if not source.enabled:
+                continue
+            try:
+                runs.append(self.run_source(source.id, reviewer=reviewer, note=note))
+            except Exception as exc:
+                run = IngestRun(
+                    id="run" + uuid.uuid4().hex[:10],
+                    timestamp=now_iso(),
+                    source_id=source.id,
+                    source_name=source.name,
+                    files=[],
+                    added=0,
+                    skipped=0,
+                    errors=[{"file": source.path, "error": str(exc)}],
+                    reviewer=reviewer or "",
+                    note=note or "",
+                )
+                self.workspace.ingest_runs.append(run)
+                source.last_run_at = run.timestamp
+                source.last_added = 0
+                source.last_skipped = 0
+                self._record(
+                    "ingest",
+                    {
+                        "source_id": source.id,
+                        "source_name": source.name,
+                        "files": [],
+                        "added": 0,
+                        "skipped": 0,
+                        "errors": 1,
+                    },
+                    reviewer=reviewer,
+                    note=note,
+                )
+                self.save()
+                runs.append(run)
+        return runs
 
     def active_clusters(self) -> List[Cluster]:
         return [c for c in self.workspace.clusters if c.status == ACTIVE]

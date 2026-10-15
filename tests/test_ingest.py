@@ -87,6 +87,13 @@ class ParseCsvTests(unittest.TestCase):
         self.assertEqual(items[0].segment, "unknown")
         self.assertTrue(items[0].id)
 
+    def test_generated_ids_are_deterministic_for_idempotency(self):
+        content = "text,segment\nPDF export broken,ent\nSSO login fails,ent\n"
+        first = parse_csv(content, source="support")
+        second = parse_csv(content, source="support")
+        self.assertEqual([i.id for i in first], [i.id for i in second])
+        self.assertEqual(len({i.id for i in first}), len(first))
+
 
 if __name__ == "__main__":
     unittest.main()

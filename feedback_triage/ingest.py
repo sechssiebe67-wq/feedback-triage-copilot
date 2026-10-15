@@ -7,8 +7,8 @@ importer maps a set of common aliases onto the canonical fields.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
-import uuid
 from typing import Dict, List, Optional, Sequence
 
 from .models import FeedbackItem
@@ -157,17 +157,32 @@ def _row_to_item(
     source = _clean(row, mapping.get("source")) or default_source
     segment = _clean(row, mapping.get("segment")) or "unknown"
     rating = _parse_rating(_clean(row, mapping.get("rating")))
-    item_id = _clean(row, mapping.get("id")) or uuid.uuid4().hex[:12]
+    url = _clean(row, mapping.get("url"))
+    created_at = _clean(row, mapping.get("created_at"))
+    item_id = _clean(row, mapping.get("id")) or _stable_id(
+        text, source, segment, url, created_at
+    )
     return FeedbackItem(
         id=item_id,
         text=text,
         source=source,
         segment=segment,
-        url=_clean(row, mapping.get("url")),
-        created_at=_clean(row, mapping.get("created_at")),
+        url=url,
+        created_at=created_at,
         rating=rating,
         language=_clean(row, mapping.get("language")),
     )
+
+
+def _stable_id(*parts: str) -> str:
+    """Derive a deterministic id from content for CSVs without an id column.
+
+    A random id would make every re-import a duplicate row, which would defeat
+    the scheduled ingestion pipeline's idempotency guarantee. Hashing the
+    stable fields keeps the same row dedupable across runs.
+    """
+    raw = "\x1f".join(part or "" for part in parts)
+    return "f" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:11]
 
 
 def _parse_rating(value: str) -> Optional[float]:

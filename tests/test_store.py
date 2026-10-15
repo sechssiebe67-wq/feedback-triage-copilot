@@ -211,6 +211,28 @@ class PersistenceTests(unittest.TestCase):
             store = TriageStore.load(os.path.join(tmp, "nope.json"))
             self.assertEqual(store.items, [])
 
+    def test_loads_legacy_workspace_without_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "legacy.json")
+            legacy = {
+                "version": 1,
+                "settings": {"similarity_threshold": 0.14, "min_support": 2},
+                "items": [{"id": "a", "text": "PDF export is broken"}],
+                "clusters": [{"id": "c1", "label": "PDF", "item_ids": ["a"]}],
+                "history": [],
+            }
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(legacy, handle)
+            store = TriageStore.load(path)
+            self.assertEqual(store.list_sources(), [])
+            self.assertEqual(store.ingest_runs, [])
+            # A save after loading writes the new collections forward.
+            store.save()
+            with open(path, encoding="utf-8") as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved["sources"], [])
+            self.assertEqual(saved["ingest_runs"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

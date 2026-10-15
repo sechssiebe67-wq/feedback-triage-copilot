@@ -120,6 +120,67 @@ class EditEvent:
 
 
 @dataclass
+class SourceConfig:
+    """A declared, repeatedly-importable feedback source.
+
+    A source points at a CSV file or a directory (optionally filtered by a
+    ``glob``) and remembers the outcome of its last run so a scheduled job can
+    be monitored without a database. ``source_label`` and ``segment_default``
+    are applied to items whose CSV does not supply a source or segment.
+    """
+
+    id: str
+    name: str
+    path: str
+    glob: str = ""
+    source_label: str = ""
+    segment_default: str = ""
+    enabled: bool = True
+    created_at: str = field(default_factory=now_iso)
+    last_run_at: str = ""
+    last_added: int = 0
+    last_skipped: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SourceConfig":
+        known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass
+class IngestRun:
+    """One append-only record of running one source.
+
+    ``files`` lists the file names that were considered, ``added``/``skipped``
+    are the idempotency counters (skipped counts ids already in the workspace)
+    and ``errors`` holds a ``{"file", "error"}`` entry per file that failed to
+    parse, so a single bad file never aborts the whole run.
+    """
+
+    id: str
+    timestamp: str
+    source_id: str
+    source_name: str
+    files: List[str] = field(default_factory=list)
+    added: int = 0
+    skipped: int = 0
+    errors: List[Dict[str, str]] = field(default_factory=list)
+    reviewer: str = ""
+    note: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "IngestRun":
+        known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass
 class Workspace:
     """The complete persisted state of one tenant workspace."""
 
@@ -127,6 +188,8 @@ class Workspace:
     clusters: List[Cluster] = field(default_factory=list)
     history: List[EditEvent] = field(default_factory=list)
     reviewers: List[Reviewer] = field(default_factory=list)
+    sources: List[SourceConfig] = field(default_factory=list)
+    ingest_runs: List[IngestRun] = field(default_factory=list)
     version: int = 1
     settings: Dict[str, Any] = field(
         default_factory=lambda: {
@@ -143,6 +206,8 @@ class Workspace:
             "clusters": [c.to_dict() for c in self.clusters],
             "history": [h.to_dict() for h in self.history],
             "reviewers": [r.to_dict() for r in self.reviewers],
+            "sources": [s.to_dict() for s in self.sources],
+            "ingest_runs": [r.to_dict() for r in self.ingest_runs],
         }
 
     @classmethod
@@ -152,6 +217,10 @@ class Workspace:
             clusters=[Cluster.from_dict(c) for c in data.get("clusters", [])],
             history=[EditEvent.from_dict(h) for h in data.get("history", [])],
             reviewers=[Reviewer.from_dict(r) for r in data.get("reviewers", [])],
+            sources=[SourceConfig.from_dict(s) for s in data.get("sources", [])],
+            ingest_runs=[
+                IngestRun.from_dict(r) for r in data.get("ingest_runs", [])
+            ],
             version=int(data.get("version", 1)),
             settings=data.get("settings")
             or {"similarity_threshold": 0.14, "min_support": 2},
