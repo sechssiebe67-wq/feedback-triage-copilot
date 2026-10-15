@@ -6,6 +6,7 @@ import argparse
 import sys
 from typing import List, Optional
 
+from .digest import build_digest, digest_to_html, digest_to_json, digest_to_text
 from .ingest import load_csv_file
 from .report import build_report, report_to_csv, report_to_html, report_to_pdf
 from .store import TriageStore
@@ -45,6 +46,13 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--out", default="")
     rep.add_argument("--reviewer", default="", help="reviewer name for the report header")
     rep.add_argument("--note", default="", help="optional note for the report header")
+
+    digest = sub.add_parser("digest", help="render the per-reviewer digest")
+    digest.add_argument("--reviewer", default="", help="reviewer name or id")
+    digest.add_argument(
+        "--format", choices=["text", "html", "json"], default="text"
+    )
+    digest.add_argument("--out", default="")
 
     reviewer = sub.add_parser("reviewer", help="manage reviewer accounts")
     reviewer_sub = reviewer.add_subparsers(dest="reviewer_command", required=True)
@@ -99,6 +107,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "cluster":
         clusters = store.recluster(reviewer=args.reviewer, note=args.note)
         print("Built %d clusters from %d items" % (len(clusters), len(store.items)))
+        return 0
+
+    if args.command == "digest":
+        digest = build_digest(store, reviewer=args.reviewer)
+        if args.format == "json":
+            payload = digest_to_json(digest)
+        elif args.format == "html":
+            payload = digest_to_html(digest)
+        else:
+            payload = digest_to_text(digest)
+        _print_bytes(payload.encode("utf-8"), args.out)
         return 0
 
     if args.command == "reviewer":

@@ -10,15 +10,19 @@ It is **not** another feedback board. It is a transparent triage layer that sits
 on top of sources the team already has (support exports, app-review exports,
 sales notes). Every topic it surfaces is backed by original quotes, source
 links, a frequency estimate, a segment distribution and an explicit uncertainty
-label. Existing tools are complemented, not replaced.
+label. A per-reviewer weekly digest and workload balancing make responsibility
+for the open themes visible and spread the triage effort.
+
+Existing tools are complemented, not replaced.
 
 ## Intended users
 
 Product teams in B2B SaaS companies of roughly 5-50 people that collect feedback
 weekly across support, sales, app reviews and NPS comments but do not have a
-dedicated research role. Their current process is manual, inconsistent and
-biased towards the loudest single voice instead of patterns over time and
-customer segments.
+dedicated research role. A handful of named teammates share the triage, so the
+per-reviewer digest and workload balancing help them agree on who reviews which
+open theme. Their current process is manual, inconsistent and biased towards the
+loudest single voice instead of patterns over time and customer segments.
 
 ## Problem
 
@@ -36,7 +40,7 @@ A weekly, automatically clustered report where each topic carries:
 - explicit uncertainty flags for thin or weakly separated clusters,
 - user corrections (merge, split, discard, rename) with a stored history.
 
-## Current capabilities (MVP)
+## Current capabilities
 
 - **Ingestion:** flexible CSV import for two-three sources with column
   auto-detection (`text`, `segment`, `source`, `url`, `date`, `rating`,
@@ -55,6 +59,14 @@ A weekly, automatically clustered report where each topic carries:
   decision log is exported alongside the report (JSON, CSV, HTML, PDF) and is
   visible on the dashboard, turning the correction history into an auditable
   decision log without authentication or a database.
+- **Reviewer digest and workload balancing:** a deterministic per-reviewer
+  weekly digest built from the workspace and report (assigned open clusters,
+  items still awaiting a decision, recent decisions by that reviewer, and
+  clusters with no reviewer activity), available as JSON, HTML and plain text
+  with the same escaping and formula-neutralisation rules as the report
+  exports. A least-loaded-first balancing suggestion orders the active,
+  undecided clusters across reviewers (ties broken by reviewer name then id)
+  and is read-only: it never mutates the workspace on its own.
 - **Persistence:** single JSON workspace file; works without a database.
 - **Operations:** `/healthz` endpoint, WSGI server, container image and Helm
   chart for the existing k3s / Argo CD setup.
@@ -68,6 +80,7 @@ feedback_triage/
   cluster.py   tokenisation, TF-IDF vectors, leader clustering, uncertainty
   store.py     JSON workspace + correction history
   report.py    weekly report aggregation and CSV/HTML/PDF rendering
+  digest.py    per-reviewer digest and workload balancing
   web.py       WSGI application (dashboard, JSON API, exports, health)
   cli.py       command line entry point
   __main__.py  `python -m feedback_triage`
@@ -78,13 +91,16 @@ so it is resource-efficient, easy to test offline and cheap to operate.
 
 ## Next direction
 
+The per-reviewer digest and workload balancing now ship in the product, so the
+remaining steps move outward from triage towards delivery and scale:
+
 1. Scheduled weekly ingestion jobs and per-source connectors.
 2. Embedding-based similarity as an optional upgrade over TF-IDF.
 3. Multi-language stop-word handling and per-language clustering.
-4. Per-reviewer weekly digest and load balancing across reviewers (follow-up to
-   the reviewer accounts and decision log now shipped).
-5. Slack/e-mail digest of the weekly report.
-6. Volume-based subscription tiers (99 EUR up to 2,000 items / 299 EUR up to
+4. Push the per-reviewer weekly digest to Slack or e-mail and let reviewers
+   accept a suggested assignment (currently the balancing order is advisory and
+   the workspace is never mutated automatically).
+5. Volume-based subscription tiers (99 EUR up to 2,000 items / 299 EUR up to
    10,000 items per workspace).
 
 ## Validation plan (from the pitch)

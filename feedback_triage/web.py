@@ -11,6 +11,7 @@ import re
 from typing import Dict, Iterable, Tuple
 from urllib.parse import parse_qs, unquote
 
+from .digest import build_digest, digest_to_html, digest_to_text
 from .ingest import parse_csv
 from .models import ACTIVE
 from .report import (
@@ -56,6 +57,9 @@ class FeedbackTriageApp:
             return self._json(200, self._health())
         if path == "/api/report" and method == "GET":
             return self._json(200, build_report(self.store))
+        if path == "/api/digest" and method == "GET":
+            reviewer = self._reviewer_query(environ)
+            return self._json(200, build_digest(self.store, reviewer=reviewer))
         if path == "/api/clusters" and method == "GET":
             clusters = [c.to_dict() for c in self.store.clusters]
             return self._json(200, {"clusters": clusters})
@@ -91,6 +95,22 @@ class FeedbackTriageApp:
             )
         if path == "/report.html" and method == "GET":
             return self._html(200, report_to_html(build_report(self.store)))
+        if path == "/digest.html" and method == "GET":
+            reviewer = self._reviewer_query(environ)
+            return self._html(
+                200, digest_to_html(build_digest(self.store, reviewer=reviewer))
+            )
+        if path == "/digest.txt" and method == "GET":
+            reviewer = self._reviewer_query(environ)
+            return (
+                "200 OK",
+                {"Content-Type": "text/plain; charset=utf-8",
+                 "Content-Disposition":
+                     "attachment; filename=feedback-digest.txt"},
+                digest_to_text(
+                    build_digest(self.store, reviewer=reviewer)
+                ).encode("utf-8"),
+            )
         if path == "/api/import" and method == "POST":
             return self._import(environ)
         if path == "/api/recluster" and method == "POST":
@@ -118,6 +138,10 @@ class FeedbackTriageApp:
         return self._json(404, {"error": "Not found: %s" % path})
 
     # handlers -----------------------------------------------------------
+    def _reviewer_query(self, environ: Dict[str, object]) -> str:
+        query = parse_qs(str(environ.get("QUERY_STRING", "")))
+        return (query.get("reviewer") or [""])[0]
+
     def _health(self) -> Dict[str, object]:
         return {
             "status": "ok",
@@ -230,13 +254,15 @@ class FeedbackTriageApp:
             for c in self.store.clusters
             if c.status != ACTIVE
         ]
+        digest = build_digest(self.store)
         values = {
             "__REPORT__": _json_for_script(report),
             "__DISCARDED__": _json_for_script(discarded),
+            "__DIGEST__": _json_for_script(digest),
             "__CONTROLS__": _controls_script(),
         }
         return re.sub(
-            "__REPORT__|__DISCARDED__|__CONTROLS__",
+            "__REPORT__|__DISCARDED__|__DIGEST__|__CONTROLS__",
             lambda match: values[match.group(0)],
             DASHBOARD_TEMPLATE,
         )
@@ -314,6 +340,9 @@ a{color:#2563eb;word-break:break-all}
 <a href="/report.csv"><button>Export CSV</button></a>
 <a href="/report.pdf"><button>Export PDF</button></a>
 <a href="/api/report"><button>JSON report</button></a>
+<a href="/digest.html"><button>Digest HTML</button></a>
+<a href="/digest.txt"><button>Digest text</button></a>
+<a href="/api/digest"><button>Digest JSON</button></a>
 <label style="display:flex;align-items:center;gap:6px">
 <input type="file" id="csv-file" accept=".csv">
 <button onclick="importFile()">Import CSV</button>
@@ -325,6 +354,7 @@ Reviewer:
 <button onclick="addReviewer()">Add reviewer</button>
 </div>
 <div id="summary" class="card"></div>
+<div id="digest"></div>
 <div id="clusters"></div>
 <div id="discarded"></div>
 <div id="decisions"></div>
@@ -332,6 +362,7 @@ Reviewer:
 <script>
 const REPORT = __REPORT__;
 const DISCARDED = __DISCARDED__;
+const DIGEST = __DIGEST__;
 __CONTROLS__
 </script>
 </body></html>
@@ -459,8 +490,48 @@ function renderDecisions(){
     </section>`).join('');
 }
 function doMerge(){mergeSelected();}
+function renderDigest(){
+  const root=document.getElementById('digest');
+  if(!root)return;
+  const d=DIGEST||{};
+  const totals=d.totals||{};
+  const reviewers=d.reviewers||[];
+  const assignments=d.assignments||[];
+  const unassigned=d.unassigned_clusters||[];
+  const suggested=d.suggested_assignments||[];
+  let html=`<h2 style="margin:18px 0 0;font-size:1.05rem">Reviewer digest</h2>`;
+  html+=`<section class="card"><p class="metrics">${totals.reviewers||0} reviewers &middot; `+
+    `${totals.active_clusters||0} active clusters &middot; ${totals.assigned_clusters||0} assigned &middot; `+
+    `${totals.unassigned_clusters||0} unassigned &middot; read-only exports: `+
+    `<a href="/api/digest">JSON</a> &middot; <a href="/digest.html">HTML</a> &middot; `+
+    `<a href="/digest.txt">text</a></p>`;
+  if(reviewers.length){
+    html+=`<p class="metrics">Reviewers: `+reviewers.map(r=>
+      `${esc(r.name)} (${r.assignment_count} assigned, ${r.open_items} open)`).join(', ')+`</p>`;
+  }
+  if(assignments.length){
+    html+=`<p class="metrics"><strong>Assignments</strong></p><ul>`+
+      assignments.map(a=>`<li>${esc(a.cluster_label)} &rarr; `+
+        `${esc(a.reviewer_name||'unassigned')} (${a.open_items} open)</li>`).join('')+`</ul>`;
+  } else {
+    html+=`<p class="metrics">No clusters are assigned yet.</p>`;
+  }
+  if(unassigned.length){
+    html+=`<p class="metrics"><strong>No reviewer activity</strong></p><ul>`+
+      unassigned.map(c=>`<li>${esc(c.cluster_label)} (${c.open_items} open)</li>`).join('')+`</ul>`;
+  }
+  if(suggested.length){
+    html+=`<p class="metrics"><strong>Suggested balancing order `+
+      `(least-loaded first)</strong></p><ul>`+
+      suggested.map(s=>`<li>${esc(s.cluster_label)} &rarr; `+
+        `${esc(s.reviewer_name)} (${s.open_items} open)</li>`).join('')+`</ul>`;
+  }
+  html+=`</section>`;
+  root.innerHTML=html;
+}
 render();
 renderDiscarded();
 renderDecisions();
+renderDigest();
 loadReviewers();
 """

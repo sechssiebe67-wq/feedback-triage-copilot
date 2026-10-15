@@ -23,6 +23,10 @@ python3 -m feedback_triage --workspace workspace.json import data/sample_reviews
 python3 -m feedback_triage --workspace workspace.json report --format csv --out report.csv
 python3 -m feedback_triage --workspace workspace.json report --format pdf --out report.pdf
 
+# per-reviewer digest (text, HTML or JSON)
+python3 -m feedback_triage --workspace workspace.json digest --format text
+python3 -m feedback_triage --workspace workspace.json digest --reviewer Alice --format json
+
 # run the web app (dashboard, JSON API, CSV/PDF export, /healthz)
 python3 -m feedback_triage --workspace workspace.json serve --port 8080
 ```
@@ -39,6 +43,7 @@ they can be restored.
 | `import <file> [--source NAME] [--no-recluster] [--reviewer NAME] [--note TEXT]` | Import a feedback CSV |
 | `cluster [--reviewer NAME] [--note TEXT]` | Re-cluster the workspace |
 | `report --format {csv,html,pdf,json} [--out FILE] [--reviewer NAME] [--note TEXT]` | Export the weekly report |
+| `digest [--reviewer NAME_OR_ID] [--format {text,html,json}] [--out FILE]` | Render the per-reviewer digest |
 | `reviewer add <name>` | Add a reviewer account |
 | `reviewer list` | List reviewer accounts |
 | `history` | Print the raw correction history |
@@ -50,6 +55,10 @@ they can be restored.
 python3 -m feedback_triage --workspace workspace.json reviewer add "Alice"
 python3 -m feedback_triage --workspace workspace.json import data/sample_support.csv --source support --reviewer Alice
 python3 -m feedback_triage --workspace workspace.json decisions
+
+# weekly digest for the whole team, or just one reviewer
+python3 -m feedback_triage --workspace workspace.json digest
+python3 -m feedback_triage --workspace workspace.json digest --reviewer Alice --format json
 ```
 
 CSV columns are auto-detected (`text`, `segment`, `source`, `url`, `date`,
@@ -63,6 +72,7 @@ delimiter (`,`, `;`, tab, `|`) is sniffed automatically.
 | GET | `/` | HTML dashboard |
 | GET | `/healthz` | Health probe (items, clusters) |
 | GET | `/api/report` | Weekly report as JSON |
+| GET | `/api/digest` | Per-reviewer digest as JSON; `?reviewer=<id-or-name>` filters to one reviewer |
 | GET | `/api/clusters`, `/api/items`, `/api/history` | Raw data |
 | GET | `/api/reviewers` | List reviewer accounts |
 | POST | `/api/reviewers` | `{"name": "Alice"}` |
@@ -71,6 +81,7 @@ delimiter (`,`, `;`, tab, `|`) is sniffed automatically.
 | POST | `/api/merge` | `{"cluster_ids": [...], "reviewer": "...", "note": "..."}` |
 | POST | `/api/clusters/{id}/{discard,restore,rename,split}` | Corrections; optional `reviewer` and `note` |
 | GET | `/report.csv`, `/report.pdf`, `/report.html` | Report exports |
+| GET | `/digest.html`, `/digest.txt` | Digest exports (`?reviewer=<id-or-name>` filters) |
 
 Correction payloads accept an optional `reviewer` (a reviewer id or name) and an
 optional `note`. They are recorded on the append-only `EditEvent`, so the report
@@ -92,6 +103,51 @@ CSV exports render the same log, escaping untrusted reviewer names and notes
 and neutralising formula-leading cells. Workspaces created before reviewer
 attribution load unchanged: missing `reviewers` and `reviewer`/`note` fields
 default to empty.
+
+## Per-reviewer digest and workload balancing
+
+The digest answers "who is responsible for which open clusters?" without leaving
+the dependency-free, database-free design. Because the workspace has no explicit
+assignment field, responsibility is inferred from the append-only decision log:
+the reviewer attributed to the most recent decision that touched a cluster owns
+it. Clusters that no reviewer has touched are listed as having no reviewer
+activity.
+
+`build_digest(store, reviewer="")` returns a plain dictionary with
+`generated_at`, `reviewer`, `reviewers`, `assignments`, `unassigned_clusters`,
+`recent_decisions`, `suggested_assignments` and `totals`. It is available as:
+
+```sh
+python3 -m feedback_triage --workspace workspace.json digest --format text
+python3 -m feedback_triage --workspace workspace.json digest --reviewer Alice --format html --out digest.html
+```
+
+`--reviewer` accepts a reviewer id or name (case-insensitive) and filters the
+digest to that reviewer; an unknown reviewer yields an empty digest rather than
+an error. The same view is exposed over HTTP at `/api/digest` (JSON),
+`/digest.html` and `/digest.txt`, and as a read-only **Reviewer digest** panel on
+the dashboard. HTML, text and JSON reuse the report's escaping rules: HTML
+escapes `<`, `>`, `&` and `"`, text neutralises spreadsheet-formula prefixes,
+and JSON is standard UTF-8 JSON.
+
+**Balancing rule (least-loaded-first).**
+`suggest_assignments(store, clusters=None)` proposes an assignment for the
+active clusters that no reviewer owns yet. Existing ownership counts towards a
+reviewer's starting load; the clusters are then assigned largest first to the
+reviewer with the fewest open clusters (least-loaded-first), with ties broken by
+reviewer name and then id. The rule is stable and explainable — running it twice
+on the same workspace returns the same order — and it is advisory only: it never
+writes to the workspace. Example JSON:
+
+```json
+{
+  "cluster_id": "c1a2b3c4d5",
+  "cluster_label": "PDF / Export",
+  "reviewer_id": "r9f0e1d2c3b4",
+  "reviewer_name": "Alice",
+  "open_items": 4
+}
+```
 
 ## Container and Kubernetes
 
@@ -117,6 +173,9 @@ CPU/memory budget.
 - **Dependency-free:** TF-IDF plus leader clustering over a small stop-word list
   and light suffix stripping, implemented with the Python standard library.
 - **Database-free:** one workspace is one JSON document, written atomically.
+- **Read-only digest:** responsibility is inferred from the decision log and the
+  balancing suggestion is advisory; rendering a digest never writes to the
+  workspace.
 - **Untrusted input stays inert:** imported feedback is never trusted. The
   dashboard escapes values before they reach the DOM and restricts source links
   to `http(s)`, the embedded report payload is escaped for the `<script>`
