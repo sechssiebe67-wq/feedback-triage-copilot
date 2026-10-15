@@ -36,11 +36,21 @@ they can be restored.
 
 | Command | Purpose |
 | --- | --- |
-| `import <file> [--source NAME] [--no-recluster]` | Import a feedback CSV |
-| `cluster` | Re-cluster the workspace |
-| `report --format {csv,html,pdf,json} [--out FILE]` | Export the weekly report |
-| `history` | Print the correction history |
+| `import <file> [--source NAME] [--no-recluster] [--reviewer NAME] [--note TEXT]` | Import a feedback CSV |
+| `cluster [--reviewer NAME] [--note TEXT]` | Re-cluster the workspace |
+| `report --format {csv,html,pdf,json} [--out FILE] [--reviewer NAME] [--note TEXT]` | Export the weekly report |
+| `reviewer add <name>` | Add a reviewer account |
+| `reviewer list` | List reviewer accounts |
+| `history` | Print the raw correction history |
+| `decisions` | Print the attributed decision log |
 | `serve [--host H] [--port P]` | Run the web application |
+
+```sh
+# reviewer accounts and an auditable decision log
+python3 -m feedback_triage --workspace workspace.json reviewer add "Alice"
+python3 -m feedback_triage --workspace workspace.json import data/sample_support.csv --source support --reviewer Alice
+python3 -m feedback_triage --workspace workspace.json decisions
+```
 
 CSV columns are auto-detected (`text`, `segment`, `source`, `url`, `date`,
 `rating`, `language`, `id` and common aliases, in English and German). The
@@ -54,11 +64,34 @@ delimiter (`,`, `;`, tab, `|`) is sniffed automatically.
 | GET | `/healthz` | Health probe (items, clusters) |
 | GET | `/api/report` | Weekly report as JSON |
 | GET | `/api/clusters`, `/api/items`, `/api/history` | Raw data |
+| GET | `/api/reviewers` | List reviewer accounts |
+| POST | `/api/reviewers` | `{"name": "Alice"}` |
 | POST | `/api/import?source=NAME` | Import CSV body |
 | POST | `/api/recluster` | Rebuild clusters |
-| POST | `/api/merge` | `{"cluster_ids": [...]}` |
-| POST | `/api/clusters/{id}/{discard,restore,rename,split}` | Corrections |
+| POST | `/api/merge` | `{"cluster_ids": [...], "reviewer": "...", "note": "..."}` |
+| POST | `/api/clusters/{id}/{discard,restore,rename,split}` | Corrections; optional `reviewer` and `note` |
 | GET | `/report.csv`, `/report.pdf`, `/report.html` | Report exports |
+
+Correction payloads accept an optional `reviewer` (a reviewer id or name) and an
+optional `note`. They are recorded on the append-only `EditEvent`, so the report
+gains a `decisions` section and the CSV export gains the `decision_*` columns.
+
+## Reviewer accounts and decision log
+
+Reviewer accounts make the correction history auditable. Reviewers are a small
+list stored in the workspace JSON (`add`/`list` via the CLI, `/api/reviewers`
+over HTTP); there is no authentication for the MVP, a reviewer is an identity
+label chosen in the dashboard toolbar or supplied via the API/CLI.
+
+Every merge, split, discard, restore, rename, re-cluster and import can be
+attributed to a reviewer and can carry a short rationale. The dashboard shows a
+decision log and sends the selected reviewer (plus an optional note) with each
+correction. The report payload exposes `decisions` entries with `action`,
+`timestamp`, `reviewer`, `note` and the affected cluster labels; HTML, PDF and
+CSV exports render the same log, escaping untrusted reviewer names and notes
+and neutralising formula-leading cells. Workspaces created before reviewer
+attribution load unchanged: missing `reviewers` and `reviewer`/`note` fields
+default to empty.
 
 ## Container and Kubernetes
 

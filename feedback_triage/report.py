@@ -13,7 +13,10 @@ import re
 from typing import Dict, List, Sequence
 
 from .cluster import build_tfidf, representative_quotes, tokenize
-from .models import ACTIVE, Cluster, FeedbackItem
+from .models import ACTIVE, Cluster, EditEvent, FeedbackItem
+
+#: How many of the most recent decisions the exported log keeps.
+DECISION_LIMIT = 50
 
 
 def _distribution(values: Sequence[str]) -> Dict[str, int]:
@@ -24,8 +27,14 @@ def _distribution(values: Sequence[str]) -> Dict[str, int]:
     return dict(sorted(result.items(), key=lambda kv: kv[1], reverse=True))
 
 
-def build_report(store) -> Dict[str, object]:
-    """Build the weekly report dictionary from a :class:`TriageStore`."""
+def build_report(
+    store, reviewer: str = "", note: str = ""
+) -> Dict[str, object]:
+    """Build the weekly report dictionary from a :class:`TriageStore`.
+
+    ``reviewer`` and ``note`` are optional provenance for the report itself
+    (e.g. the CLI ``report --reviewer`` header); they do not modify history.
+    """
     items = store.items
     items_by_id = store.items_by_id()
     vectors = {
@@ -45,8 +54,13 @@ def build_report(store) -> Dict[str, object]:
             cluster, items_by_id, vectors, total_items
         ))
 
-    return {
+    labels_by_id = {c.id: c.label for c in store.clusters}
+    reviewers_by_id = {r.id: r.name for r in getattr(store, "reviewers", [])}
+
+    report: Dict[str, object] = {
         "generated_at": _now(),
+        "reviewer": reviewer or "",
+        "note": note or "",
         "totals": {
             "items": total_items,
             "clusters": len(active),
@@ -56,7 +70,55 @@ def build_report(store) -> Dict[str, object]:
             "segments": _distribution([i.segment for i in items]),
         },
         "clusters": cluster_entries,
+        "decisions": _decision_log(store.history, reviewers_by_id, labels_by_id),
     }
+    return report
+
+
+def _decision_log(
+    history: Sequence[EditEvent],
+    reviewers_by_id: Dict[str, str],
+    labels_by_id: Dict[str, str],
+) -> List[Dict[str, object]]:
+    """Return the most recent decisions, newest first."""
+    decisions: List[Dict[str, object]] = []
+    for event in reversed(list(history)):
+        reviewer = event.reviewer or ""
+        if reviewer in reviewers_by_id:
+            reviewer = reviewers_by_id[reviewer]
+        decisions.append({
+            "action": event.action,
+            "timestamp": event.timestamp,
+            "reviewer": reviewer,
+            "note": event.note or "",
+            "clusters": _affected_labels(event, labels_by_id),
+        })
+        if len(decisions) >= DECISION_LIMIT:
+            break
+    return decisions
+
+
+def _affected_labels(
+    event: EditEvent, labels_by_id: Dict[str, str]
+) -> List[str]:
+    details = event.details or {}
+    cluster_ids: List[str] = []
+    if details.get("cluster_id"):
+        cluster_ids.append(str(details["cluster_id"]))
+    if details.get("source"):
+        cluster_ids.append(str(details["source"]))
+    for source_id in details.get("sources", []) or []:
+        cluster_ids.append(str(source_id))
+    labels: List[str] = []
+    for cluster_id in cluster_ids:
+        label = labels_by_id.get(cluster_id)
+        if label and label not in labels:
+            labels.append(label)
+    if event.action == "rename":
+        new_label = details.get("to")
+        if new_label and new_label not in labels:
+            labels.append(str(new_label))
+    return labels
 
 
 def _now() -> str:
@@ -116,7 +178,10 @@ def report_to_csv(report: Dict[str, object]) -> str:
         "cluster_id", "cluster_label", "cluster_size", "cluster_share",
         "uncertainty", "cohesion", "separation", "quote_id", "quote_text",
         "quote_source", "quote_segment", "quote_url", "quote_created_at",
+        "decision_timestamp", "decision_action", "decision_reviewer",
+        "decision_note", "decision_clusters",
     ])
+    empty_decision = ["", "", "", "", ""]
     for cluster in report["clusters"]:  # type: ignore[index]
         quotes = cluster["quotes"] or [{}]  # type: ignore[index]
         for quote in quotes:
@@ -127,8 +192,17 @@ def report_to_csv(report: Dict[str, object]) -> str:
                 quote.get("id", ""), quote.get("text", ""),
                 quote.get("source", ""), quote.get("segment", ""),
                 quote.get("url", ""), quote.get("created_at", ""),
-            ]
+            ] + empty_decision
             writer.writerow([_csv_safe(cell) for cell in row])
+    for decision in report.get("decisions", []):  # type: ignore[union-attr]
+        row = ["", "", "", "", "", "", "", "", "", "", "", "", ""] + [
+            decision.get("timestamp", ""),
+            decision.get("action", ""),
+            decision.get("reviewer", ""),
+            decision.get("note", ""),
+            "|".join(decision.get("clusters", [])),  # type: ignore[arg-type]
+        ]
+        writer.writerow([_csv_safe(cell) for cell in row])
     return buffer.getvalue()
 
 
@@ -162,6 +236,8 @@ def report_to_html(report: Dict[str, object]) -> str:
         "blockquote{margin:8px 0;padding:8px 12px;background:#f0f4f8;",
         "border-left:3px solid #9aa5b1;border-radius:0 6px 6px 0}",
         "a{color:#2563eb;word-break:break-all}",
+        ".decision{border-left:3px solid #2563eb;padding:6px 12px;margin:8px 0;",
+        "background:#f0f4f8;border-radius:0 6px 6px 0}",
         "footer{color:#7b8794;font-size:.8rem;padding:24px 0}",
         "</style></head><body><main>",
         "<h1>Weekly Feedback Triage Report</h1>",
@@ -173,6 +249,12 @@ def report_to_html(report: Dict[str, object]) -> str:
             totals["uncertain_clusters"], totals["discarded_clusters"],  # type: ignore[index]
         ),
     ]
+    if report.get("reviewer"):  # type: ignore[union-attr]
+        parts.append(
+            '<p class="metrics">Prepared by %s</p>' % _esc(report["reviewer"])  # type: ignore[index]
+        )
+    if report.get("note"):  # type: ignore[union-attr]
+        parts.append('<p class="metrics">%s</p>' % _esc(report["note"]))  # type: ignore[index]
     for cluster in report["clusters"]:  # type: ignore[index]
         parts.append('<section class="card">')
         parts.append("<h2>%s</h2>" % _esc(cluster["label"]))
@@ -212,12 +294,42 @@ def report_to_html(report: Dict[str, object]) -> str:
                 )
             )
         parts.append("</section>")
+    parts.extend(_decision_log_html(report.get("decisions", [])))  # type: ignore[arg-type]
     parts.append(
         "<footer>Generated by Feedback Triage Copilot. Evidence is mandatory; "
         "no opaque priority score is applied.</footer>"
     )
     parts.append("</main></body></html>")
     return "\n".join(parts)
+
+
+def _decision_log_html(decisions: Sequence[Dict[str, object]]) -> List[str]:
+    if not decisions:
+        return []
+    parts: List[str] = ["<section class=\"card\"><h2>Decision log</h2>"]
+    for decision in decisions:
+        reviewer = _esc(decision.get("reviewer") or "unreviewed")
+        clusters = decision.get("clusters") or []
+        cluster_line = (
+            "<br><small>Clusters: %s</small>" % _esc(", ".join(clusters))
+            if clusters
+            else ""
+        )
+        note = decision.get("note")
+        note_line = "<br>%s" % _esc(note) if note else ""
+        parts.append(
+            '<div class="decision"><strong>%s</strong> &middot; %s'
+            "<br><small>%s</small>%s%s</div>"
+            % (
+                _esc(decision.get("action")),
+                reviewer,
+                _esc(decision.get("timestamp")),
+                cluster_line,
+                note_line,
+            )
+        )
+    parts.append("</section>")
+    return parts
 
 
 def _fmt_dist(dist: Dict[str, int]) -> str:
@@ -303,6 +415,22 @@ def _pdf_lines(report: Dict[str, object]) -> List[tuple]:
             if quote.get("url"):
                 meta += " (%s)" % quote["url"]
             styles.append((meta, 9, False))
+        styles.append(("", 10, False))
+    decisions = report.get("decisions", [])  # type: ignore[union-attr]
+    if decisions:
+        styles.append(("Decision log", 13, True))
+        for decision in decisions:  # type: ignore[union-attr]
+            line = "%s  %s  by %s" % (
+                decision.get("timestamp", ""),
+                decision.get("action", ""),
+                decision.get("reviewer") or "unreviewed",
+            )
+            clusters = decision.get("clusters") or []
+            if clusters:
+                line += "  [%s]" % ", ".join(clusters)  # type: ignore[arg-type]
+            styles.append((line, 9, False))
+            if decision.get("note"):
+                styles.append(("  note: %s" % decision["note"], 9, False))
         styles.append(("", 10, False))
     return styles
 

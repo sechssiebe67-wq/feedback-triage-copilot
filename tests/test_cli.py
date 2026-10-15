@@ -65,6 +65,62 @@ class CliTests(unittest.TestCase):
         code, _ = self.run_cli(["import", self.csv_path, "--no-recluster"])
         self.assertEqual(code, 0)
 
+    def test_reviewer_add_and_list(self):
+        code, out = self.run_cli(["reviewer", "add", "Alice"])
+        self.assertEqual(code, 0)
+        self.assertIn("Alice", out)
+        code, out = self.run_cli(["reviewer", "list"])
+        self.assertEqual(code, 0)
+        self.assertIn("Alice", out)
+        with open(self.workspace, encoding="utf-8") as handle:
+            import json
+
+            saved = json.load(handle)
+        self.assertEqual(saved["reviewers"][0]["name"], "Alice")
+
+    def test_import_with_reviewer_then_decisions(self):
+        self.run_cli(["reviewer", "add", "Alice"])
+        code, _ = self.run_cli(
+            ["import", self.csv_path, "--source", "support", "--reviewer", "Alice"]
+        )
+        self.assertEqual(code, 0)
+        code, out = self.run_cli(["decisions"])
+        self.assertEqual(code, 0)
+        self.assertIn("import", out)
+        self.assertIn("Alice", out)
+
+    def test_cluster_and_report_accept_reviewer_note(self):
+        self.run_cli(["import", self.csv_path])
+        code, _ = self.run_cli(
+            ["cluster", "--reviewer", "Alice", "--note", "retune"]
+        )
+        self.assertEqual(code, 0)
+        out_path = os.path.join(self.tmp.name, "report.json")
+        code, _ = self.run_cli([
+            "report", "--format", "json", "--out", out_path,
+            "--reviewer", "Alice", "--note", "week",
+        ])
+        self.assertEqual(code, 0)
+        with open(out_path, encoding="utf-8") as handle:
+            contents = handle.read()
+        self.assertIn("Alice", contents)
+        self.assertIn("week", contents)
+
+    def test_decisions_prints_discard_reviewer_and_note(self):
+        from feedback_triage.store import TriageStore
+
+        self.run_cli(["reviewer", "add", "Alice"])
+        self.run_cli(["import", self.csv_path])
+        store = TriageStore.load(self.workspace)
+        reviewer_id = store.list_reviewers()[0].id
+        cluster_id = store.active_clusters()[0].id
+        store.discard(cluster_id, reviewer=reviewer_id, note="duplicate of PDF export")
+        code, out = self.run_cli(["decisions"])
+        self.assertEqual(code, 0)
+        self.assertIn("discard", out)
+        self.assertIn("Alice", out)
+        self.assertIn("duplicate of PDF export", out)
+
 
 if __name__ == "__main__":
     unittest.main()

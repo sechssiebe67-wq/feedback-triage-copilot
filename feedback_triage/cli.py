@@ -33,14 +33,27 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("file")
     imp.add_argument("--source", default="import")
     imp.add_argument("--no-recluster", action="store_true")
+    imp.add_argument("--reviewer", default="", help="reviewer name or id")
+    imp.add_argument("--note", default="", help="optional rationale")
 
-    sub.add_parser("cluster", help="re-cluster the workspace")
+    cluster = sub.add_parser("cluster", help="re-cluster the workspace")
+    cluster.add_argument("--reviewer", default="", help="reviewer name or id")
+    cluster.add_argument("--note", default="", help="optional rationale")
 
     rep = sub.add_parser("report", help="render the weekly report")
     rep.add_argument("--format", choices=["csv", "html", "pdf", "json"], default="csv")
     rep.add_argument("--out", default="")
+    rep.add_argument("--reviewer", default="", help="reviewer name for the report header")
+    rep.add_argument("--note", default="", help="optional note for the report header")
+
+    reviewer = sub.add_parser("reviewer", help="manage reviewer accounts")
+    reviewer_sub = reviewer.add_subparsers(dest="reviewer_command", required=True)
+    reviewer_add = reviewer_sub.add_parser("add", help="add a reviewer")
+    reviewer_add.add_argument("name")
+    reviewer_sub.add_parser("list", help="list reviewers")
 
     sub.add_parser("history", help="print the correction history")
+    sub.add_parser("decisions", help="print the attributed decision log")
     return parser
 
 
@@ -74,13 +87,27 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.command == "import":
         items = load_csv_file(args.file, source=args.source)
-        added = store.add_items(items, recluster=not args.no_recluster)
+        added = store.add_items(
+            items,
+            recluster=not args.no_recluster,
+            reviewer=args.reviewer,
+            note=args.note,
+        )
         print("Imported %d new items (%d in workspace)" % (added, len(store.items)))
         return 0
 
     if args.command == "cluster":
-        clusters = store.recluster()
+        clusters = store.recluster(reviewer=args.reviewer, note=args.note)
         print("Built %d clusters from %d items" % (len(clusters), len(store.items)))
+        return 0
+
+    if args.command == "reviewer":
+        if args.reviewer_command == "add":
+            reviewer = store.add_reviewer(args.name)
+            print("Added reviewer %s (%s)" % (reviewer.name, reviewer.id))
+        else:
+            for reviewer in store.list_reviewers():
+                print("%s  %s" % (reviewer.id, reviewer.name))
         return 0
 
     if args.command == "history":
@@ -88,8 +115,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("%s  %-10s %s" % (event.timestamp, event.action, event.details))
         return 0
 
-    if args.command == "report":
+    if args.command == "decisions":
         report = build_report(store)
+        for decision in report["decisions"]:  # type: ignore[index]
+            line = "%s  %-10s %-14s %s" % (
+                decision["timestamp"], decision["action"],
+                decision["reviewer"] or "unreviewed", decision["note"],
+            )
+            clusters = decision.get("clusters") or []
+            if clusters:
+                line += "  [%s]" % ", ".join(clusters)
+            print(line)
+        return 0
+
+    if args.command == "report":
+        report = build_report(store, reviewer=args.reviewer, note=args.note)
         if args.format == "csv":
             _print_bytes(report_to_csv(report).encode("utf-8"), args.out)
         elif args.format == "html":

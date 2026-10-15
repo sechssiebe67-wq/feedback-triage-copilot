@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -85,7 +86,115 @@ class CorrectionTests(unittest.TestCase):
             store.discard("does-not-exist")
 
 
+class ReviewerTests(unittest.TestCase):
+    def test_add_get_and_list_reviewers(self):
+        store = TriageStore()
+        reviewer = store.add_reviewer("Alice")
+        self.assertTrue(reviewer.id)
+        self.assertEqual(reviewer.name, "Alice")
+        self.assertEqual(store.list_reviewers(), [reviewer])
+        self.assertEqual(store.get_reviewer(reviewer.id), reviewer)
+        self.assertEqual(store.reviewer_name(reviewer.id), "Alice")
+
+    def test_add_reviewer_requires_name(self):
+        with self.assertRaises(ValueError):
+            TriageStore().add_reviewer("   ")
+
+    def test_add_reviewer_is_case_insensitive_dedupe(self):
+        store = TriageStore()
+        first = store.add_reviewer("Alice")
+        again = store.add_reviewer("alice")
+        self.assertEqual(first.id, again.id)
+        self.assertEqual(len(store.list_reviewers()), 1)
+
+    def test_unknown_reviewer_name_passes_through(self):
+        store = TriageStore()
+        self.assertEqual(store.reviewer_name("Nobody"), "Nobody")
+        self.assertEqual(store.reviewer_name(""), "")
+
+    def test_get_unknown_reviewer_raises(self):
+        with self.assertRaises(KeyError):
+            TriageStore().get_reviewer("nope")
+
+
+class AttributedDecisionTests(unittest.TestCase):
+    def test_corrections_record_reviewer_and_note(self):
+        store = make_store()
+        active = store.active_clusters()
+        store.merge([c.id for c in active], reviewer="Alice", note="same theme")
+        self.assertEqual(store.history[-1].reviewer, "Alice")
+        self.assertEqual(store.history[-1].note, "same theme")
+
+    def test_discard_restore_rename_split_are_attributed(self):
+        store = make_store()
+        cluster = store.active_clusters()[0]
+        store.discard(cluster.id, reviewer="Bob", note="noise")
+        self.assertEqual(store.history[-1].reviewer, "Bob")
+        store.restore(cluster.id, reviewer="Bob", note="back")
+        self.assertEqual(store.history[-1].note, "back")
+        store.rename(cluster.id, "New", reviewer="Bob", note="clearer")
+        self.assertEqual(store.history[-1].action, "rename")
+        self.assertEqual(store.history[-1].reviewer, "Bob")
+        moved = cluster.item_ids[:1]
+        store.split(cluster.id, moved, reviewer="Bob", note="distinct")
+        self.assertEqual(store.history[-1].details["moved"], moved)
+        self.assertEqual(store.history[-1].note, "distinct")
+
+    def test_import_and_recluster_are_attributed(self):
+        store = TriageStore()
+        store.add_items(sample_items(), reviewer="Alice", note="weekly batch")
+        self.assertEqual(store.history[-1].action, "import")
+        self.assertEqual(store.history[-1].reviewer, "Alice")
+        store.recluster(reviewer="Alice", note="retune")
+        self.assertEqual(store.history[-1].action, "recluster")
+        self.assertEqual(store.history[-1].note, "retune")
+
+    def test_events_default_to_empty_attribution(self):
+        store = make_store()
+        event = store.history[-1]
+        self.assertEqual(event.reviewer, "")
+        self.assertEqual(event.note, "")
+
+
 class PersistenceTests(unittest.TestCase):
+    def test_reviewer_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "workspace.json")
+            store = make_store(path)
+            reviewer = store.add_reviewer("Alice")
+            store.discard(store.active_clusters()[0].id, reviewer=reviewer.id,
+                          note="duplicate")
+            loaded = TriageStore.load(path)
+            self.assertEqual(len(loaded.list_reviewers()), 1)
+            self.assertEqual(loaded.list_reviewers()[0].name, "Alice")
+            self.assertEqual(loaded.history[-1].reviewer, reviewer.id)
+            self.assertEqual(loaded.history[-1].note, "duplicate")
+
+    def test_loads_legacy_workspace_without_reviewers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "legacy.json")
+            legacy = {
+                "version": 1,
+                "settings": {"similarity_threshold": 0.14, "min_support": 2},
+                "items": [{"id": "a", "text": "PDF export is broken"}],
+                "clusters": [{"id": "c1", "label": "PDF", "item_ids": ["a"]}],
+                "history": [
+                    {"id": "e1", "timestamp": "2026-01-01T00:00:00+00:00",
+                     "action": "discard", "details": {"cluster_id": "c1"}}
+                ],
+            }
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(legacy, handle)
+            store = TriageStore.load(path)
+            self.assertEqual(store.list_reviewers(), [])
+            self.assertEqual(store.history[0].reviewer, "")
+            self.assertEqual(store.history[0].note, "")
+            # Still writable and forward compatible after loading.
+            store.add_reviewer("Alice")
+            store.save()
+            with open(path, encoding="utf-8") as handle:
+                saved = json.load(handle)
+            self.assertIn("reviewers", saved)
     def test_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "workspace.json")
