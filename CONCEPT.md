@@ -1,70 +1,105 @@
-# Product Criteria
+# Feedback Triage Copilot
 
-## Hard Requirements (MUST)
+## Goal
 
-Every product must satisfy these requirements before the Salesman can approve its development.
+Feedback Triage Copilot turns scattered customer feedback into a weekly,
+evidence-backed triage report so a small product team can make a defensible
+prioritisation in under 30 minutes.
 
-- **Web Deployable:** Must run as a web application and be accessible through a browser.
-- **Originality:** Must not be a direct copy of an existing product, whether internally developed or commercially available. Existing concepts may be combined or significantly improved to create something unique.
-- **Expandable:** Must have an architecture that allows additional features and future improvements.
-- **Real User Value:** Must solve a real problem, provide entertainment, improve productivity, or offer another clearly identifiable benefit.
-- **Clearly Defined Audience:** Must have at least one identifiable target audience.
-- **Standalone:** Must function independently without requiring another AI Product Factory application.
-- **Autonomous Operation:** Must operate without continuous human intervention after deployment.
-- **Kubernetes Compatible:** Must be containerized and deployable on the existing k3s cluster using Helm and Argo CD.
-- **Resource Efficient:** Must stay within defined CPU, RAM, and storage budgets.
-- **Security:** Must follow basic security practices, including dependency scanning, safe secret handling, and input validation.
-- **Testable:** Must support automated testing and have measurable acceptance criteria.
-- **Maintainable:** Must contain readable source code, clear project structure, and sufficient technical documentation.
-- **Legal Compliance:** Must respect software licences, copyright, privacy regulations, and applicable laws.
-- **Health Monitoring:** Must expose a reliable way to verify whether the deployment is healthy.
-- **Unique Product Identity:** Must have a unique repository name, product name, and subdomain.
+It is **not** another feedback board. It is a transparent triage layer that sits
+on top of sources the team already has (support exports, app-review exports,
+sales notes). Every topic it surfaces is backed by original quotes, source
+links, a frequency estimate, a segment distribution and an explicit uncertainty
+label. Existing tools are complemented, not replaced.
 
-## Soft Requirements (SHOULD)
+## Intended users
 
-These requirements should influence the Salesman's evaluation and ranking.
+Product teams in B2B SaaS companies of roughly 5-50 people that collect feedback
+weekly across support, sales, app reviews and NPS comments but do not have a
+dedicated research role. Their current process is manual, inconsistent and
+biased towards the loudest single voice instead of patterns over time and
+customer segments.
 
-- **Database Independence:** Should preferably work without a database. A database is allowed when persistent storage adds meaningful value.
-- **Monetization Potential:** Should have a realistic path to revenue, such as subscriptions, advertisements, one-time purchases, or paid features.
-- **Low Operating Costs:** Should require minimal infrastructure, external APIs, and paid services.
-- **Fast MVP Development:** Should ideally have a deployable minimum viable product within a limited development budget.
-- **Low Maintenance:** Should require minimal ongoing maintenance and manual administration.
-- **Market Differentiation:** Should offer a meaningful advantage over existing alternatives.
-- **Growth Potential:** Should be able to attract additional users without a proportional increase in operating costs.
-- **User Retention:** Should provide reasons for users to return regularly.
-- **Discoverability:** Should be understandable, searchable, and easy to share.
-- **Mobile Friendly:** Should work well on smartphones, tablets, and desktop browsers.
-- **Accessibility:** Should follow established accessibility principles.
-- **Minimal Dependencies:** Should avoid unnecessary external services and vendor lock-in.
-- **Measurable Success:** Should provide metrics that help evaluate adoption, reliability, and product value.
-- **Reusability:** Should preferably reuse existing components, design patterns, and deployment templates.
-- **Innovation Potential:** Should have opportunities for unique features or future experimentation.
+## Problem
 
-## Product Rejection Criteria
+- Feedback arrives through several channels and is reviewed by hand.
+- Prioritisation is inconsistent between people and weeks.
+- Trends and recurring themes stay invisible.
+- Decisions rest on anecdotes rather than on evidence.
 
-The Salesman must reject a product idea if:
+## Value proposition
 
-- It is merely a clone without meaningful differentiation.
-- Its purpose or target audience cannot be explained clearly.
-- It cannot run within the available infrastructure budget.
-- It requires unavailable credentials, licences, hardware, or external services.
-- It introduces unacceptable security, legal, or privacy risks.
-- It has no realistic path to a working MVP.
-- It requires continuous manual operation.
-- It offers no meaningful advantage over an already active product.
-- Its projected value does not justify its development and operating costs.
+A weekly, automatically clustered report where each topic carries:
 
-## Product Lifecycle Requirements
+- original quotes and source links (evidence is mandatory),
+- frequency estimate and segment/source distribution,
+- explicit uncertainty flags for thin or weakly separated clusters,
+- user corrections (merge, split, discard, rename) with a stored history.
 
-Every approved product must support:
+## Current capabilities (MVP)
 
-1. **Creation:** A dedicated GitHub repository is created.
-2. **Development:** The AI Developer implements the MVP.
-3. **Review:** Automated testing and AI code review validate the product.
-4. **Deployment:** Helm and GitOps configuration deploy the application.
-5. **Monitoring:** Operational health and product performance are evaluated.
-6. **Iteration:** The product can receive additional features and improvements.
-7. **Archival:** The repository is preserved while the deployment and Helm chart are removed.
-8. **Reactivation:** An archived product can be rebuilt and deployed again if its potential improves.
+- **Ingestion:** flexible CSV import for two-three sources with column
+  auto-detection (`text`, `segment`, `source`, `url`, `date`, `rating`,
+  `language`, `id`).
+- **Clustering:** dependency-free TF-IDF + leader clustering with configurable
+  similarity threshold and minimum support.
+- **Uncertainty:** clusters below the support threshold, with low cohesion or
+  with low separation from the nearest cluster are flagged.
+- **Report:** weekly web view plus CSV and PDF export; representative quotes
+  chosen by closeness to the cluster centroid; no opaque score ranking.
+- **Corrections:** merge, split, discard/restore and rename with an append-only
+  history so every change is auditable.
+- **Persistence:** single JSON workspace file; works without a database.
+- **Operations:** `/healthz` endpoint, WSGI server, container image and Helm
+  chart for the existing k3s / Argo CD setup.
 
-The maximum number of simultaneously active product repositories is **10**.
+## Architecture
+
+```
+feedback_triage/
+  models.py    domain dataclasses and serialisation
+  ingest.py    CSV parsing with column auto-detection
+  cluster.py   tokenisation, TF-IDF vectors, leader clustering, uncertainty
+  store.py     JSON workspace + correction history
+  report.py    weekly report aggregation and CSV/HTML/PDF rendering
+  web.py       WSGI application (dashboard, JSON API, exports, health)
+  cli.py       command line entry point
+  __main__.py  `python -m feedback_triage`
+```
+
+The design stays intentionally dependency-free (Python standard library only),
+so it is resource-efficient, easy to test offline and cheap to operate.
+
+## Next direction
+
+1. Scheduled weekly ingestion jobs and per-source connectors.
+2. Embedding-based similarity as an optional upgrade over TF-IDF.
+3. Multi-language stop-word handling and per-language clustering.
+4. Reviewer accounts, comments per cluster and exported decision log.
+5. Slack/e-mail digest of the weekly report.
+6. Volume-based subscription tiers (99 EUR up to 2,000 items / 299 EUR up to
+   10,000 items per workspace).
+
+## Validation plan (from the pitch)
+
+Two weeks: five semi-structured interviews with product owners receiving at
+least 100 feedback items per week, plus a concierge prototype with a design
+partner (500 real items clustered, corrected and rated). Success criteria
+before further investment: three of five teams halve triage time, at least 70%
+of clusters accepted unchanged, and at least two teams commit to a paid pilot.
+
+## Platform requirements
+
+The product satisfies the factory criteria: it is a web application, original,
+expandable, serves a clearly defined audience, is standalone, runs autonomously,
+is containerised for k3s with Helm/Argo CD, stays within a small resource budget,
+uses no external services, is covered by automated tests, and exposes a health
+endpoint.
+
+### Known risks
+
+- Data access and consent for customer quotes can delay rollout.
+- Cluster quality can suffer on very short, multilingual or ironic text.
+- Without mandatory evidence users may distrust clusters as hallucination.
+- Value depends on the discipline to actually read the report weekly.
+- Pricing and willingness to pay are unproven.

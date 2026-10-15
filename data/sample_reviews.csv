@@ -1,0 +1,15 @@
+review_text,plan,channel,permalink,review_date,stars,lang
+"Export to PDF is broken, it always crashes",Enterprise,app_store,https://reviews.example.com/r/1,2026-01-05,1,en
+"Please fix PDF export, it is essential for us",Business,app_store,https://reviews.example.com/r/2,2026-01-06,2,en
+"PDF Bericht Export funktioniert nicht",Enterprise,play_store,https://reviews.example.com/r/3,2026-01-08,1,de
+"SSO login just redirects forever",Enterprise,app_store,https://reviews.example.com/r/4,2026-01-07,1,en
+"Cannot sign in with our company SSO",Business,play_store,https://reviews.example.com/r/5,2026-01-09,1,en
+"The app is slow and laggy on older phones",Business,play_store,https://reviews.example.com/r/6,2026-01-12,2,en
+"Performance is terrible when scrolling long lists",Starter,play_store,https://reviews.example.com/r/7,2026-01-13,2,en
+"Love the new dashboard, very clean",Business,app_store,https://reviews.example.com/r/8,2026-01-14,5,en
+"Great product overall, friendly support",Starter,app_store,https://reviews.example.com/r/9,2026-01-15,5,en
+"Wish there was a Slack integration",Business,app_store,https://reviews.example.com/r/10,2026-01-16,3,en
+"Notifications are way too frequent",Business,play_store,https://reviews.example.com/r/11,2026-01-16,2,en
+"Search is useless, cannot find my tickets",Enterprise,app_store,https://reviews.example.com/r/12,2026-01-17,2,en
+"Dark mode please!",Starter,play_store,https://reviews.example.com/r/13,2026-01-17,4,en
+"Billing charged me twice this month",Business,app_store,https://reviews.example.com/r/14,2026-01-18,1,en
