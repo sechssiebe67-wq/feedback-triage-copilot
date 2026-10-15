@@ -13,7 +13,7 @@ import re
 from typing import Dict, List, Sequence
 
 from .cluster import build_tfidf, representative_quotes, tokenize
-from .models import ACTIVE, Cluster, EditEvent, FeedbackItem
+from .models import ACTIVE, CLAIMED, Cluster, EditEvent, FeedbackItem
 
 #: How many of the most recent decisions the exported log keeps.
 DECISION_LIMIT = 50
@@ -44,6 +44,10 @@ def build_report(
     active = [c for c in store.clusters if c.status == ACTIVE]
     active.sort(key=lambda c: len(c.item_ids), reverse=True)
 
+    labels_by_id = {c.id: c.label for c in store.clusters}
+    reviewers_by_id = {r.id: r.name for r in getattr(store, "reviewers", [])}
+    claims_by_cluster = _active_claims_by_cluster(store)
+
     total_items = len(items)
     cluster_entries: List[Dict[str, object]] = []
     uncertain = 0
@@ -51,11 +55,9 @@ def build_report(
         if cluster.uncertainty:
             uncertain += 1
         cluster_entries.append(_cluster_entry(
-            cluster, items_by_id, vectors, total_items
+            cluster, items_by_id, vectors, total_items,
+            claims_by_cluster.get(cluster.id),
         ))
-
-    labels_by_id = {c.id: c.label for c in store.clusters}
-    reviewers_by_id = {r.id: r.name for r in getattr(store, "reviewers", [])}
 
     report: Dict[str, object] = {
         "generated_at": _now(),
@@ -70,13 +72,36 @@ def build_report(
             "segments": _distribution([i.segment for i in items]),
         },
         "clusters": cluster_entries,
+        "claims": [
+            {
+                "cluster_id": cluster_id,
+                "label": labels_by_id.get(cluster_id, ""),
+                "reviewer": claim.reviewer,
+                "status": claim.status,
+                "claimed_at": claim.claimed_at,
+                "updated_at": claim.updated_at,
+                "note": claim.note,
+            }
+            for cluster_id, claim in claims_by_cluster.items()
+        ],
         "decisions": _decision_log(store.history, reviewers_by_id, labels_by_id),
     }
     return report
 
 
+def _active_claims_by_cluster(store) -> Dict[str, object]:
+    """Return the active (``claimed``) claim per cluster id."""
+    claims: Dict[str, object] = {}
+    for claim in getattr(store, "claims", []) or []:
+        if claim.status == CLAIMED:
+            claims[claim.cluster_id] = claim
+    return claims
+
+
 #: Correction actions that assign a cluster to the reviewer who made them.
-DIGEST_DECISION_ACTIONS = ("merge", "split", "discard", "restore", "rename")
+DIGEST_DECISION_ACTIONS = (
+    "merge", "split", "discard", "restore", "rename", "resolve",
+)
 
 #: The uncertainty flags the digest always reports a count for.
 DIGEST_UNCERTAINTY_FLAGS = ("few_evidence", "low_cohesion", "low_separation")
@@ -155,11 +180,16 @@ def build_digest(
         and (decision["reviewer"] or "").lower() == target
     ][: max(int(limit), 0)]
 
+    claimed_by_me, claimed_by_others, unclaimed = _queue_lists(store, active, target)
+
     return {
         "reviewer": resolved,
         "generated_at": _now(),
         "assigned": assigned,
         "needs_review": needs_review,
+        "claimed_by_me": claimed_by_me,
+        "claimed_by_others": claimed_by_others,
+        "unclaimed": unclaimed,
         "open_uncertainties": open_uncertainties,
         "recent_decisions": recent_decisions,
         "totals": {
@@ -167,6 +197,100 @@ def build_digest(
             "clusters": len(active),
             "uncertain_clusters": uncertain_clusters,
         },
+    }
+
+
+#: Claim lifecycle actions that decide whether a cluster is currently resolved.
+_CLAIM_STATE_ACTIONS = ("claim", "release", "resolve")
+
+
+def _resolved_cluster_ids(store) -> set:
+    """Return clusters whose most recent claim lifecycle event was ``resolve``.
+
+    A resolved claim record may outlive a later claim/release cycle, so the
+    claim list alone cannot tell whether a cluster is currently resolved. The
+    append-only history records every claim, release and resolve in order; the
+    last such event per cluster is authoritative. This keeps a cluster that was
+    resolved, re-claimed and then released visible as unclaimed instead of
+    hiding behind the stale resolved record.
+    """
+    latest: Dict[str, str] = {}
+    for event in getattr(store, "history", []) or []:
+        if event.action not in _CLAIM_STATE_ACTIONS:
+            continue
+        for cluster_id in _affected_cluster_ids(event):
+            latest[cluster_id] = event.action
+    return {
+        cluster_id for cluster_id, action in latest.items() if action == "resolve"
+    }
+
+
+def _queue_lists(store, active, target: str):
+    """Partition the uncertain, unresolved backlog for one reviewer.
+
+    Returns ``(claimed_by_me, claimed_by_others, unclaimed)``. Each entry carries
+    the cluster's label, size, uncertainty flags and its active claim (reviewer,
+    status, note), so the digest and ``/api/queue`` share exactly one shape.
+    """
+    claims = list(getattr(store, "claims", []) or [])
+    active_claims = {c.cluster_id: c for c in claims if c.status == CLAIMED}
+    resolved_ids = _resolved_cluster_ids(store)
+    reviewers_by_id = {r.id: r.name for r in getattr(store, "reviewers", [])}
+    claimed_by_me: List[Dict[str, object]] = []
+    claimed_by_others: List[Dict[str, object]] = []
+    unclaimed: List[Dict[str, object]] = []
+    for cluster in active:
+        if not cluster.uncertainty:
+            continue
+        claim = active_claims.get(cluster.id)
+        if claim is None and cluster.id in resolved_ids:
+            continue
+        claim_reviewer = (
+            reviewers_by_id.get(claim.reviewer, claim.reviewer) if claim else ""
+        )
+        entry = {
+            "id": cluster.id,
+            "label": cluster.label,
+            "size": len(cluster.item_ids),
+            "uncertainty": list(cluster.uncertainty),
+            "claim_reviewer": claim_reviewer,
+            "claim_status": claim.status if claim else "",
+            "claim_note": claim.note if claim else "",
+        }
+        if claim is None:
+            unclaimed.append(entry)
+        elif claim_reviewer.lower() == target:
+            claimed_by_me.append(entry)
+        else:
+            claimed_by_others.append(entry)
+
+    def _order(entry):
+        return (entry["size"], len(entry["uncertainty"]))
+
+    for bucket in (claimed_by_me, claimed_by_others, unclaimed):
+        bucket.sort(key=_order, reverse=True)
+    return claimed_by_me, claimed_by_others, unclaimed
+
+
+def build_queue(store, reviewer_id_or_name: str = "") -> Dict[str, object]:
+    """Return the review queue view for one reviewer.
+
+    The queue is the read-only counterpart of the claim/release/resolve
+    commands: it shows which uncertain clusters are claimed by the reviewer,
+    claimed by someone else and still unclaimed.
+    """
+    raw = (reviewer_id_or_name or "").strip()
+    resolved = _resolve_reviewer_name(store, raw)
+    active = [c for c in store.clusters if c.status == ACTIVE]
+    claimed_by_me, claimed_by_others, unclaimed = _queue_lists(
+        store, active, resolved.lower()
+    )
+    return {
+        "reviewer": resolved,
+        "generated_at": _now(),
+        "claimed_by_me": claimed_by_me,
+        "claimed_by_others": claimed_by_others,
+        "unclaimed": unclaimed,
     }
 
 
@@ -232,6 +356,7 @@ def _cluster_entry(
     items_by_id: Dict[str, FeedbackItem],
     vectors: Dict[str, Dict[str, float]],
     total_items: int,
+    claim=None,
 ) -> Dict[str, object]:
     member_items = [items_by_id[i] for i in cluster.item_ids if i in items_by_id]
     size = len(member_items)
@@ -247,6 +372,9 @@ def _cluster_entry(
         "cohesion": cluster.cohesion,
         "separation": cluster.separation,
         "uncertainty": list(cluster.uncertainty),
+        "claim_reviewer": claim.reviewer if claim else "",
+        "claim_status": claim.status if claim else "",
+        "claim_note": claim.note if claim else "",
         "segments": _distribution([i.segment for i in member_items]),
         "sources": _distribution([i.source for i in member_items]),
         "first_seen": dates[0] if dates else "",
@@ -278,6 +406,7 @@ def report_to_csv(report: Dict[str, object]) -> str:
         "cluster_id", "cluster_label", "cluster_size", "cluster_share",
         "uncertainty", "cohesion", "separation", "quote_id", "quote_text",
         "quote_source", "quote_segment", "quote_url", "quote_created_at",
+        "claim_reviewer", "claim_status", "claim_note",
         "decision_timestamp", "decision_action", "decision_reviewer",
         "decision_note", "decision_clusters",
     ])
@@ -292,10 +421,13 @@ def report_to_csv(report: Dict[str, object]) -> str:
                 quote.get("id", ""), quote.get("text", ""),
                 quote.get("source", ""), quote.get("segment", ""),
                 quote.get("url", ""), quote.get("created_at", ""),
+                cluster.get("claim_reviewer", ""),
+                cluster.get("claim_status", ""),
+                cluster.get("claim_note", ""),
             ] + empty_decision
             writer.writerow([_csv_safe(cell) for cell in row])
     for decision in report.get("decisions", []):  # type: ignore[union-attr]
-        row = ["", "", "", "", "", "", "", "", "", "", "", "", ""] + [
+        row = [""] * 16 + [
             decision.get("timestamp", ""),
             decision.get("action", ""),
             decision.get("reviewer", ""),
@@ -355,6 +487,7 @@ def report_to_html(report: Dict[str, object]) -> str:
         )
     if report.get("note"):  # type: ignore[union-attr]
         parts.append('<p class="metrics">%s</p>' % _esc(report["note"]))  # type: ignore[index]
+    parts.extend(_review_queue_html(report.get("claims", [])))  # type: ignore[arg-type]
     for cluster in report["clusters"]:  # type: ignore[index]
         parts.append('<section class="card">')
         parts.append("<h2>%s</h2>" % _esc(cluster["label"]))
@@ -401,6 +534,27 @@ def report_to_html(report: Dict[str, object]) -> str:
     )
     parts.append("</main></body></html>")
     return "\n".join(parts)
+
+
+def _review_queue_html(claims: Sequence[Dict[str, object]]) -> List[str]:
+    """Render the active review queue as an escaped HTML card."""
+    if not claims:
+        return []
+    parts: List[str] = ['<section class="card"><h2>Review queue</h2>']
+    for claim in claims:
+        parts.append(
+            '<p class="metrics"><strong>%s</strong> &middot; claimed by %s '
+            "&middot; %s</p>"
+            % (
+                _esc(claim.get("label")),
+                _esc(claim.get("reviewer")),
+                _esc(claim.get("claimed_at")),
+            )
+        )
+        if claim.get("note"):
+            parts.append('<p class="metrics">%s</p>' % _esc(claim["note"]))
+    parts.append("</section>")
+    return parts
 
 
 def _decision_log_html(decisions: Sequence[Dict[str, object]]) -> List[str]:
@@ -481,6 +635,25 @@ def _pdf_lines(report: Dict[str, object]) -> List[tuple]:
         ),
         ("", 10, False),
     ]
+    claims = report.get("claims", [])  # type: ignore[union-attr]
+    if claims:
+        styles.append(("Review queue", 13, True))
+        for claim in claims:  # type: ignore[union-attr]
+            styles.append(
+                (
+                    "%s  claimed by %s  (%s)"
+                    % (
+                        claim.get("label", ""),
+                        claim.get("reviewer", ""),
+                        claim.get("claimed_at", ""),
+                    ),
+                    9,
+                    False,
+                )
+            )
+            if claim.get("note"):
+                styles.append(("  note: %s" % claim["note"], 9, False))
+        styles.append(("", 10, False))
     for cluster in report["clusters"]:  # type: ignore[index]
         styles.append(
             (

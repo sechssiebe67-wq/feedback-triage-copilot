@@ -74,6 +74,19 @@ A weekly, automatically clustered report where each topic carries:
   **read-only** — it never modifies the workspace, clusters or history, so it
   can be generated as often as needed and closes roadmap item 4 without adding
   a dependency, database or external service.
+- **Review queue (claim / release / resolve):** any reviewer can *claim* an
+  uncertain cluster so teammates can see it is taken, *release* it back to the
+  backlog, or *resolve* it with a note. Claims live in the workspace JSON as
+  `Claim` records (no database) and are surfaced through `claim`, `release`,
+  `resolve` and `queue` on the CLI, `GET /api/queue` and the
+  `POST /api/clusters/{id}/{claim,release,resolve}` endpoints, the dashboard
+  "Review queue" card and the per-reviewer digest, which splits the backlog
+  into **claimed by me**, **claimed by others** and **unclaimed**. Claiming is
+  idempotent for the current claimant and rejected for another reviewer unless
+  `--force` reassigns it; only the claimant (or an empty reviewer) may release.
+  Every claim, release and resolve appends exactly one `EditEvent`, so the
+  decision log and the exported CSV/HTML/PDF "Review queue" sections stay
+  complete and auditable.
 - **Persistence:** single JSON workspace file; works without a database.
 - **Operations:** `/healthz` endpoint, WSGI server, container image and Helm
   chart for the existing k3s / Argo CD setup.
@@ -83,11 +96,13 @@ A weekly, automatically clustered report where each topic carries:
 ```
 feedback_triage/
   models.py    domain dataclasses and serialisation (items, clusters, sources,
-               ingest runs, reviewers, history)
+               ingest runs, reviewers, claims, history)
   ingest.py    CSV parsing with column auto-detection
   cluster.py   tokenisation, TF-IDF vectors, leader clustering, uncertainty
-  store.py     JSON workspace, source registry, ingestion runs, corrections
-  report.py    weekly report and per-reviewer digest aggregation, CSV/HTML/PDF
+  store.py     JSON workspace, source registry, ingestion runs, corrections,
+               review queue (claim / release / resolve)
+  report.py    weekly report, per-reviewer digest and review queue aggregation,
+               CSV/HTML/PDF
   web.py       WSGI application (dashboard, JSON API, digest, exports, health)
   cli.py       command line entry point
   __main__.py  `python -m feedback_triage`
@@ -98,9 +113,16 @@ so it is resource-efficient, easy to test offline and cheap to operate.
 
 ## Next direction
 
-Shipped this cycle: the **per-reviewer weekly digest** (roadmap item 4) — the
+Shipped this cycle: the **review queue** — reviewer assignment for uncertain
+clusters. Any reviewer can `claim`, `release` and `resolve` a cluster through
+the CLI, `GET /api/queue` and the `POST /api/clusters/{id}/{claim,release,resolve}`
+endpoints; the dashboard "Review queue" card exposes the same actions; and the
+digest splits the uncertain backlog into claimed-by-me, claimed-by-others and
+unclaimed. This marks **assignment** (roadmap item 5) as shipped.
+
+Previously shipped: the **per-reviewer weekly digest** (roadmap item 4) — the
 read-only `digest` command, `GET /api/digest` and the dashboard "My digest"
-card now show each reviewer the active clusters whose most recent decision they
+card show each reviewer the active clusters whose most recent decision they
 made, the uncertain clusters still awaiting their decision, open uncertainty
 counts and their recent decisions.
 
@@ -114,8 +136,10 @@ Remaining follow-ups:
 3. Multi-language stop-word handling and per-language clustering.
 4. Digest delivery through Slack or e-mail (the in-app, CLI and HTTP digest
    shipped here is the payload that would be delivered).
-5. Load balancing that assigns clusters across reviewers based on the per-
-   reviewer load the digest now makes visible.
+5. Load balancing that assigns clusters across reviewers: with claim/release
+   events plus the per-reviewer digest, the load per reviewer is now recorded
+   and visible, so the data the balancing rule needs already exists. The next
+   step is a suggested-assignment rule on top of that data.
 6. Volume-based subscription tiers (99 EUR up to 2,000 items / 299 EUR up to
    10,000 items per workspace).
 
@@ -139,10 +163,16 @@ exactly which uncertain clusters still need a decision and how many open
 uncertainty flags remain, so a design partner can see each reviewer's queue and
 confirm whether the weekly report is actually being triaged. Because the digest
 is read-only it can be produced as often as the trial needs without touching
-the audit trail. In the interviews this turns "we read the report each week"
-into a concrete count of clusters resolved per reviewer, which is the evidence
-behind the "halve triage time" and "70% of clusters accepted unchanged"
-success criteria.
+the audit trail.
+
+The **review queue** turns that visibility into a hard metric: every claim,
+release and resolve appends an `EditEvent` attributed to a named reviewer, so
+the prototype can compute *clusters resolved per reviewer* directly from the
+`resolve` events instead of inferring it from the report. The interviews can
+then ask "how many uncertain clusters did each reviewer resolve this week, and
+how many were left unclaimed?" — a count that is backed by an append-only log,
+not by self-reporting. This is the evidence behind the "halve triage time" and
+"70% of clusters accepted unchanged" success criteria.
 
 ## Platform requirements
 

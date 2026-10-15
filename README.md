@@ -49,6 +49,10 @@ they can be restored.
 | `reviewer add <name>` | Add a reviewer account |
 | `reviewer list` | List reviewer accounts |
 | `digest --reviewer NAME [--limit N] [--format {text,json}]` | Weekly digest for one reviewer |
+| `claim --cluster ID --reviewer NAME [--note TEXT] [--force]` | Claim an uncertain cluster |
+| `release --cluster ID [--reviewer NAME]` | Release a claimed cluster |
+| `resolve --cluster ID --reviewer NAME [--note TEXT]` | Resolve a claimed cluster |
+| `queue [--reviewer NAME] [--format {text,json}]` | Show the claimed / unclaimed review queue |
 | `history` | Print the raw correction history |
 | `decisions` | Print the attributed decision log |
 | `serve [--host H] [--port P]` | Run the web application |
@@ -132,6 +136,7 @@ delimiter (`,`, `;`, tab, `|`) is sniffed automatically.
 | GET | `/healthz` | Health probe (items, clusters) |
 | GET | `/api/report` | Weekly report as JSON |
 | GET | `/api/digest?reviewer=NAME&limit=N` | Read-only weekly digest for one reviewer (400 when `reviewer` is missing) |
+| GET | `/api/queue?reviewer=NAME` | Review queue: `claimed_by_me`, `claimed_by_others`, `unclaimed` (400 when `reviewer` is missing) |
 | GET | `/api/clusters`, `/api/items`, `/api/history` | Raw data |
 | GET | `/api/reviewers` | List reviewer accounts |
 | POST | `/api/reviewers` | `{"name": "Alice"}` |
@@ -145,6 +150,9 @@ delimiter (`,`, `;`, tab, `|`) is sniffed automatically.
 | POST | `/api/recluster` | Rebuild clusters |
 | POST | `/api/merge` | `{"cluster_ids": [...], "reviewer": "...", "note": "..."}` |
 | POST | `/api/clusters/{id}/{discard,restore,rename,split}` | Corrections; optional `reviewer` and `note` |
+| POST | `/api/clusters/{id}/claim` | `{"reviewer": "...", "note": "...", "force": false}` |
+| POST | `/api/clusters/{id}/release` | `{"reviewer": "..."}` (claimant or empty reviewer) |
+| POST | `/api/clusters/{id}/resolve` | `{"reviewer": "...", "note": "..."}` |
 | GET | `/report.csv`, `/report.pdf`, `/report.html` | Report exports |
 
 Correction payloads accept an optional `reviewer` (a reviewer id or name) and an
@@ -185,6 +193,53 @@ The same view is available over HTTP as
 `GET /api/digest?reviewer=Alice&limit=10` (a missing `reviewer` returns HTTP
 400) and on the dashboard as a compact "My digest" card: choosing a reviewer in
 the toolbar reloads `/?reviewer=Alice` and renders that reviewer's digest.
+
+## Review queue (claim / release / resolve)
+
+Uncertain clusters form a shared backlog. Any reviewer can **claim** one so
+teammates can see it is taken, **release** it back to the backlog, or
+**resolve** it with a note. Claims are stored in the workspace JSON (no
+database) as `Claim` records and are covered by the same append-only history:
+every claim, release and resolve appends exactly one `EditEvent` with the
+acting reviewer and note, and resolved claims stay in the report's `decisions`
+log.
+
+```sh
+# claim an uncertain cluster, resolve it, or hand it back
+python3 -m feedback_triage --workspace workspace.json claim --cluster c123 --reviewer Alice --note "checking the retail segment"
+python3 -m feedback_triage --workspace workspace.json resolve --cluster c123 --reviewer Alice --note "duplicate of PDF export"
+python3 -m feedback_triage --workspace workspace.json release --cluster c123 --reviewer Alice
+
+# every reviewer sees their own queue: mine / others / unclaimed
+python3 -m feedback_triage --workspace workspace.json queue --reviewer Alice
+python3 -m feedback_triage --workspace workspace.json queue --reviewer Alice --format json
+```
+
+Claiming is **idempotent** for the current claimant (claiming twice leaves one
+active claim and one `claim` event). Claiming a cluster held by another
+reviewer raises an error unless `--force` is given, which reassigns the claim
+and records a `claim` event attributed to the new reviewer. Only the current
+claimant (or an empty reviewer) may `release`.
+
+Resolving a cluster clears it from the queue; its resolved claim is kept for the
+audit trail. If a resolved cluster becomes uncertain again, a reviewer can claim
+it afresh: the new active claim takes precedence over the older resolved one, so
+the cluster reappears in exactly one queue bucket (`claimed_by_me`,
+`claimed_by_others` or `unclaimed`) and in the report's active `claims`.
+Releasing that fresh claim returns the cluster to the queue as unclaimed: the
+queue follows the cluster's latest claim, release or resolve event, not the
+older resolved record. Reviewer ids from the dashboard are resolved to the
+stored reviewer name on claim, release and resolve, so a reviewer using the
+dashboard sees their own claims under `claimed_by_me`.
+
+The same actions are available over HTTP (`GET /api/queue?reviewer=NAME` and
+`POST /api/clusters/{id}/{claim,release,resolve}`) and on the dashboard
+"Review queue" card, which shows the three buckets with claim/release/resolve
+buttons. The digest and `GET /api/digest` also include `claimed_by_me`,
+`claimed_by_others` and `unclaimed`, and the report exports add the
+`claim_reviewer` / `claim_status` / `claim_note` CSV columns plus a "Review
+queue" section in HTML and PDF (with untrusted reviewer names and notes
+escaped and formula-leading cells neutralised).
 
 ## Container and Kubernetes
 

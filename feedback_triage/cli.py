@@ -9,6 +9,7 @@ from typing import List, Optional
 from .ingest import load_csv_file
 from .report import (
     build_digest,
+    build_queue,
     build_report,
     report_to_csv,
     report_to_html,
@@ -86,6 +87,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     digest.add_argument("--format", choices=["text", "json"], default="text")
 
+    claim = sub.add_parser("claim", help="claim an uncertain cluster")
+    claim.add_argument("--cluster", required=True, help="cluster id")
+    claim.add_argument("--reviewer", required=True, help="reviewer name or id")
+    claim.add_argument("--note", default="", help="optional rationale")
+    claim.add_argument(
+        "--force", action="store_true",
+        help="reassign a cluster claimed by another reviewer",
+    )
+
+    release = sub.add_parser("release", help="release a claimed cluster")
+    release.add_argument("--cluster", required=True, help="cluster id")
+    release.add_argument("--reviewer", default="", help="reviewer name or id")
+
+    resolve = sub.add_parser("resolve", help="resolve a claimed cluster")
+    resolve.add_argument("--cluster", required=True, help="cluster id")
+    resolve.add_argument("--reviewer", required=True, help="reviewer name or id")
+    resolve.add_argument("--note", default="", help="optional rationale")
+
+    queue = sub.add_parser("queue", help="show the per-reviewer review queue")
+    queue.add_argument("--reviewer", default="", help="reviewer name or id")
+    queue.add_argument("--format", choices=["text", "json"], default="text")
+
     sub.add_parser("history", help="print the correction history")
     sub.add_parser("decisions", help="print the attributed decision log")
     return parser
@@ -120,6 +143,8 @@ def _format_digest_text(digest) -> str:
         % (totals["items"], totals["clusters"], totals["uncertain_clusters"]),
         "Assigned to you: %d cluster(s)" % len(digest["assigned"]),
         "Clusters needing review: %d" % len(digest["needs_review"]),
+        "Claimed by you: %d cluster(s)" % len(digest.get("claimed_by_me", [])),
+        "Unclaimed backlog: %d cluster(s)" % len(digest.get("unclaimed", [])),
     ]
     for cluster in digest["needs_review"]:
         flags = ", ".join(cluster["uncertainty"]) or "none"
@@ -143,6 +168,32 @@ def _format_digest_text(digest) -> str:
             if decision["note"]:
                 line += ": %s" % decision["note"]
             lines.append(line)
+    return "\n".join(lines)
+
+
+def _format_queue_text(queue) -> str:
+    lines = [
+        "Review queue for %s (generated %s)"
+        % (queue["reviewer"] or "everyone", queue["generated_at"]),
+    ]
+    sections = (
+        ("Claimed by you", "claimed_by_me"),
+        ("Claimed by others", "claimed_by_others"),
+        ("Unclaimed", "unclaimed"),
+    )
+    for title, key in sections:
+        entries = queue[key]
+        lines.append("%s: %d" % (title, len(entries)))
+        for entry in entries:
+            reviewer = (
+                " by %s" % entry["claim_reviewer"]
+                if entry["claim_reviewer"] else ""
+            )
+            flags = ", ".join(entry["uncertainty"]) or "none"
+            lines.append(
+                "  - %s (%d quotes)%s [%s]"
+                % (entry["label"], entry["size"], reviewer, flags)
+            )
     return "\n".join(lines)
 
 
@@ -275,6 +326,45 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps(digest, ensure_ascii=False, indent=2))
         else:
             print(_format_digest_text(digest))
+        return 0
+
+    if args.command in ("claim", "release", "resolve"):
+        try:
+            if args.command == "claim":
+                claim = store.claim_cluster(
+                    args.cluster, args.reviewer, note=args.note, force=args.force
+                )
+                print(
+                    "Claimed cluster %s for %s"
+                    % (claim.cluster_id, claim.reviewer)
+                )
+            elif args.command == "release":
+                claim = store.release_cluster(args.cluster, args.reviewer)
+                print(
+                    "Released cluster %s (was %s)"
+                    % (claim.cluster_id, claim.reviewer)
+                )
+            else:
+                store.resolve_cluster(
+                    args.cluster, args.reviewer, note=args.note
+                )
+                print(
+                    "Resolved cluster %s for %s"
+                    % (args.cluster, args.reviewer)
+                )
+        except (ValueError, KeyError) as exc:
+            print("Error: %s" % exc)
+            return 2
+        return 0
+
+    if args.command == "queue":
+        queue = build_queue(store, args.reviewer)
+        if args.format == "json":
+            import json
+
+            print(json.dumps(queue, ensure_ascii=False, indent=2))
+        else:
+            print(_format_queue_text(queue))
         return 0
 
     if args.command == "history":
