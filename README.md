@@ -83,6 +83,11 @@ CPU/memory budget.
 - **Dependency-free:** TF-IDF plus leader clustering over a small stop-word list
   and light suffix stripping, implemented with the Python standard library.
 - **Database-free:** one workspace is one JSON document, written atomically.
+- **Untrusted input stays inert:** imported feedback is never trusted. The
+  dashboard escapes values before they reach the DOM and restricts source links
+  to `http(s)`, the embedded report payload is escaped for the `<script>`
+  context, CSV exports neutralise formula-leading cells (`= + - @`, tab, CR),
+  and the HTML report escapes every imported field.
 
 ## Tests
 

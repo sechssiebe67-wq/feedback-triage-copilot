@@ -195,8 +195,27 @@ class FeedbackTriageApp:
     def _dashboard(self) -> str:
         report = build_report(self.store)
         return DASHBOARD_TEMPLATE.replace(
-            "__REPORT__", json.dumps(report, ensure_ascii=False)
+            "__REPORT__", _json_for_script(report)
         ).replace("__CONTROLS__", _controls_script())
+
+
+def _json_for_script(payload: object) -> str:
+    """Serialise ``payload`` so it is safe to embed in a ``<script>`` block.
+
+    ``json.dumps`` does not escape ``<``, ``>`` or ``&``, so a value containing
+    ``</script>`` would terminate the surrounding element and let untrusted
+    feedback text inject markup. Escaping those characters (plus the U+2028 /
+    U+2029 line separators) keeps the payload inert while remaining valid
+    JavaScript.
+    """
+    text = json.dumps(payload, ensure_ascii=False)
+    return (
+        text.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
 
 
 def _status_text(status: int) -> str:
@@ -270,7 +289,9 @@ __CONTROLS__
 def _controls_script() -> str:
     return r"""
 function esc(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML;}
-function fmtDist(d){return Object.entries(d).map(([k,v])=>`${k}: ${v}`).join(', ')||'none';}
+function attr(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function safeUrl(s){const u=String(s??'').trim();return /^https?:\/\//i.test(u)?u:'';}
+function fmtDist(d){return Object.entries(d).map(([k,v])=>`${esc(k)}: ${v}`).join(', ')||'none';}
 function selected(){return Array.from(document.querySelectorAll('.pick:checked')).map(c=>c.value);}
 function selectedItems(){return Array.from(document.querySelectorAll('.pickitem:checked')).map(c=>c.value);}
 function render(){
@@ -286,25 +307,33 @@ function render(){
   root.innerHTML=REPORT.clusters.map(c=>`
     <section class="card">
       <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
-        <h2><input type="checkbox" class="pick" value="${c.id}"> ${esc(c.label)}</h2>
+        <h2><input type="checkbox" class="pick" value="${attr(c.id)}"> ${esc(c.label)}</h2>
         <div>
-          <button onclick="renameCluster('${c.id}')">Rename</button>
-          <button onclick="discardCluster('${c.id}')">Discard</button>
+          <button class="cluster-action" data-action="rename" data-cluster="${attr(c.id)}">Rename</button>
+          <button class="cluster-action" data-action="discard" data-cluster="${attr(c.id)}">Discard</button>
         </div>
       </div>
       <p class="metrics">${c.uncertainty.map(f=>`<span class="flag">${esc(f)}</span>`).join('')}</p>
       <p class="metrics">${c.size} quotes (${(c.share*100).toFixed(0)}%) &middot;
         cohesion ${c.cohesion.toFixed(2)} &middot; separation ${c.separation.toFixed(2)}</p>
       <p class="metrics">Segments: ${fmtDist(c.segments)} &middot; Sources: ${fmtDist(c.sources)}</p>
-      ${c.quotes.map(q=>`<blockquote>
-        <label><input type="checkbox" class="pickitem" value="${q.id}"> ${esc(q.text)}</label>
+      ${c.quotes.map(q=>{const u=safeUrl(q.url);return `<blockquote>
+        <label><input type="checkbox" class="pickitem" value="${attr(q.id)}"> ${esc(q.text)}</label>
         <br><small>${esc(q.source)} &middot; ${esc(q.segment)}
-        ${q.url?`&middot; <a href="${esc(q.url)}">source</a>`:''}</small>
-      </blockquote>`).join('')}
+        ${u?`&middot; <a href="${attr(u)}" target="_blank" rel="noopener noreferrer">source</a>`:''}</small>
+      </blockquote>`;}).join('')}
       <div class="quote-actions">
-        <button onclick="splitCluster('${c.id}')">Split selected quotes off</button>
+        <button class="cluster-action" data-action="split" data-cluster="${attr(c.id)}">Split selected quotes off</button>
       </div>
     </section>`).join('');
+  root.querySelectorAll('.cluster-action').forEach(b=>{
+    b.addEventListener('click',()=>{
+      const id=b.dataset.cluster;
+      if(b.dataset.action==='rename')renameCluster(id);
+      else if(b.dataset.action==='discard')discardCluster(id);
+      else splitCluster(id);
+    });
+  });
 }
 async function post(url, body){
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},

@@ -58,6 +58,35 @@ class CsvTests(unittest.TestCase):
         csv_text = report_to_csv(build_report(TriageStore()))
         self.assertEqual(len(csv_text.strip().splitlines()), 1)
 
+    def test_csv_neutralises_formula_injection(self):
+        store = TriageStore()
+        store.add_items([
+            FeedbackItem(id="=1+1", text="=cmd|'/C calc'!A1", segment="@seg"),
+            FeedbackItem(id="q", text="=cmd|'/C calc'!A1 second", segment="@seg"),
+        ])
+        csv_text = report_to_csv(build_report(store))
+        self.assertIn("'=1+1", csv_text)
+        self.assertIn("'=cmd|", csv_text)
+        self.assertIn("'@seg", csv_text)
+        for line in csv_text.splitlines()[1:]:
+            for cell in line.split(","):
+                self.assertFalse(
+                    cell.startswith(("=", "+", "@", "\t", "\r")),
+                    "formula-capable cell not neutralised: %r" % cell,
+                )
+
+    def test_csv_neutralises_leading_plus_and_minus(self):
+        store = TriageStore()
+        store.add_items([
+            FeedbackItem(id="a", text="+1+1", url="-2+3"),
+            FeedbackItem(id="b", text="+1+1 again", url="-2+3"),
+        ])
+        csv_text = report_to_csv(build_report(store))
+        self.assertIn("'+1+1", csv_text)
+        self.assertIn("'-2+3", csv_text)
+        self.assertNotIn(",+1+1", csv_text)
+        self.assertNotIn(",-2+3", csv_text)
+
 
 class HtmlTests(unittest.TestCase):
     def test_html_escapes_content(self):
@@ -73,6 +102,33 @@ class HtmlTests(unittest.TestCase):
     def test_html_contains_uncertainty_flags(self):
         html = report_to_html(build_report(make_store()))
         self.assertIn("few_evidence", html)
+
+    def test_html_escapes_segment_distribution(self):
+        store = TriageStore()
+        store.add_items([
+            FeedbackItem(id="x", text="broken export page",
+                         segment="<img src=x onerror=alert(1)>"),
+            FeedbackItem(id="y", text="broken export page two",
+                         segment="<img src=x onerror=alert(1)>"),
+        ])
+        html = report_to_html(build_report(store))
+        self.assertNotIn("<img src=x onerror=alert(1)>", html)
+        self.assertIn("&lt;img", html)
+
+    def test_html_drops_non_http_url_schemes(self):
+        store = TriageStore()
+        store.add_items([
+            FeedbackItem(id="x", text="broken export page", url="javascript:alert(1)"),
+            FeedbackItem(id="y", text="broken export page two", url="javascript:alert(2)"),
+        ])
+        html = report_to_html(build_report(store))
+        self.assertNotIn("javascript:", html)
+        self.assertNotIn('href=""', html)
+
+    def test_html_keeps_http_links(self):
+        html = report_to_html(build_report(make_store()))
+        self.assertIn('href="http://', html)
+        self.assertIn('rel="noopener noreferrer"', html)
 
 
 class PdfTests(unittest.TestCase):

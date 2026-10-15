@@ -2,8 +2,9 @@ import io
 import json
 import unittest
 
+from feedback_triage.models import FeedbackItem
 from feedback_triage.store import TriageStore
-from feedback_triage.web import FeedbackTriageApp
+from feedback_triage.web import FeedbackTriageApp, _controls_script, _json_for_script
 
 
 CSV = (
@@ -61,6 +62,33 @@ class WebTests(unittest.TestCase):
         self.assertTrue(status.startswith("200"))
         self.assertIn("text/html", headers["Content-Type"])
         self.assertIn(b"Feedback Triage Copilot", body)
+
+    def test_dashboard_neutralises_script_breakout(self):
+        self.store.add_items([
+            FeedbackItem(id="x", text="</script><script>alert(1)</script> broken export"),
+            FeedbackItem(id="y", text="</script><script>alert(2)</script> broken export again"),
+        ])
+        status, _, body = self.call("GET", "/")
+        self.assertTrue(status.startswith("200"))
+        self.assertNotIn(b"</script><script>alert", body)
+        self.assertIn(b"\\u003c/script\\u003e", body)
+
+    def test_json_for_script_escapes_dangerous_characters(self):
+        payload = {"text": "</script><b>&x</b>\u2028"}
+        encoded = _json_for_script(payload)
+        self.assertNotIn("</script>", encoded)
+        self.assertNotIn("<b>", encoded)
+        self.assertNotIn("&x", encoded)
+        self.assertNotIn("\u2028", encoded)
+        self.assertEqual(json.loads(encoded), payload)
+
+    def test_controls_script_uses_attribute_escaping(self):
+        script = _controls_script()
+        self.assertNotIn('value="${q.id}"', script)
+        self.assertNotIn('href="${esc(q.url)}"', script)
+        self.assertIn("attr(q.id)", script)
+        self.assertIn("safeUrl(q.url)", script)
+        self.assertIn("attr(u)", script)
 
     def test_discard_and_history(self):
         self.import_csv()

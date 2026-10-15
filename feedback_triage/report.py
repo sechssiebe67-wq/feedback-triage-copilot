@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from typing import Dict, List, Sequence
 
 from .cluster import build_tfidf, representative_quotes, tokenize
@@ -103,7 +104,12 @@ def _cluster_entry(
 
 
 def report_to_csv(report: Dict[str, object]) -> str:
-    """One row per evidence quote, with cluster-level context repeated."""
+    """One row per evidence quote, with cluster-level context repeated.
+
+    Untrusted cells are neutralised against spreadsheet formula injection:
+    a value starting with ``= + - @`` (or a leading tab/CR) is prefixed with
+    ``'`` so Excel/Sheets/LibreOffice treat it as text.
+    """
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow([
@@ -114,15 +120,26 @@ def report_to_csv(report: Dict[str, object]) -> str:
     for cluster in report["clusters"]:  # type: ignore[index]
         quotes = cluster["quotes"] or [{}]  # type: ignore[index]
         for quote in quotes:
-            writer.writerow([
+            row = [
                 cluster["id"], cluster["label"], cluster["size"],
                 cluster["share"], "|".join(cluster["uncertainty"]),  # type: ignore[arg-type]
                 cluster["cohesion"], cluster["separation"],
                 quote.get("id", ""), quote.get("text", ""),
                 quote.get("source", ""), quote.get("segment", ""),
                 quote.get("url", ""), quote.get("created_at", ""),
-            ])
+            ]
+            writer.writerow([_csv_safe(cell) for cell in row])
     return buffer.getvalue()
+
+
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: object) -> object:
+    """Prefix formula-like strings so spreadsheets do not execute them."""
+    if isinstance(value, str) and value[:1] in _FORMULA_PREFIXES:
+        return "'" + value
+    return value
 
 
 def report_to_html(report: Dict[str, object]) -> str:
@@ -175,12 +192,16 @@ def report_to_html(report: Dict[str, object]) -> str:
         )
         parts.append(
             '<p class="metrics">Segments: %s &middot; Sources: %s</p>'
-            % (_fmt_dist(cluster["segments"]), _fmt_dist(cluster["sources"]))
+            % (
+                _esc(_fmt_dist(cluster["segments"])),
+                _esc(_fmt_dist(cluster["sources"])),
+            )
         )
         for quote in cluster["quotes"]:  # type: ignore[union-attr]
+            url = _safe_url(quote.get("url"))
             link = (
-                ' <a href="%s">source</a>' % _esc(quote["url"])
-                if quote.get("url")
+                ' <a href="%s" rel="noopener noreferrer">source</a>' % _esc(url)
+                if url
                 else ""
             )
             parts.append(
@@ -211,6 +232,19 @@ def _esc(value: object) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+_SAFE_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+
+def _safe_url(value: object) -> str:
+    """Return ``value`` only when it is an http(s) URL, else an empty string.
+
+    Untrusted feedback may supply ``javascript:`` or ``data:`` links; dropping
+    them prevents script URLs in rendered anchors.
+    """
+    text = "" if value is None else str(value).strip()
+    return text if _SAFE_URL_RE.match(text) else ""
 
 
 def report_to_pdf(report: Dict[str, object]) -> bytes:
