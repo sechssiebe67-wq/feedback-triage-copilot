@@ -224,6 +224,40 @@ class QueueDigestTests(unittest.TestCase):
         self.assertEqual([c["id"] for c in digest["unclaimed"]], ["c2"])
         self.assertEqual([c["id"] for c in digest["assigned"]], ["c1"])
 
+    def test_reclaimed_cluster_returns_to_queue(self):
+        store = make_store()
+        store.claim_cluster("c1", "Alice")
+        store.resolve_cluster("c1", "Alice")
+        store.claim_cluster("c1", "Bob")
+
+        self.assertEqual(store.claim_for("c1").reviewer, "Bob")
+        report = build_report(store)
+        self.assertEqual([c["cluster_id"] for c in report["claims"]], ["c1"])
+        self.assertEqual(report["claims"][0]["reviewer"], "Bob")
+
+        bob_queue = build_queue(store, "Bob")
+        self.assertEqual([c["id"] for c in bob_queue["claimed_by_me"]], ["c1"])
+        self.assertEqual(bob_queue["claimed_by_others"], [])
+        self.assertEqual([c["id"] for c in bob_queue["unclaimed"]], ["c2"])
+
+        bob_digest = build_digest(store, "Bob")
+        self.assertEqual([c["id"] for c in bob_digest["claimed_by_me"]], ["c1"])
+        self.assertEqual([c["id"] for c in bob_digest["unclaimed"]], ["c2"])
+
+        alice_queue = build_queue(store, "Alice")
+        self.assertEqual(alice_queue["claimed_by_me"], [])
+        self.assertEqual(
+            [c["id"] for c in alice_queue["claimed_by_others"]], ["c1"]
+        )
+        self.assertEqual([c["id"] for c in alice_queue["unclaimed"]], ["c2"])
+
+        ids = [
+            c["id"]
+            for c in bob_queue["claimed_by_me"]
+            + bob_queue["claimed_by_others"] + bob_queue["unclaimed"]
+        ]
+        self.assertEqual(len(ids), len(set(ids)))
+
     def test_build_queue_and_digest_agree(self):
         store = make_store()
         store.claim_cluster("c1", "Alice")

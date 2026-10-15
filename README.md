@@ -221,6 +221,12 @@ reviewer raises an error unless `--force` is given, which reassigns the claim
 and records a `claim` event attributed to the new reviewer. Only the current
 claimant (or an empty reviewer) may `release`.
 
+Resolving a cluster clears it from the queue; its resolved claim is kept for the
+audit trail. If a resolved cluster becomes uncertain again, a reviewer can claim
+it afresh: the new active claim takes precedence over the older resolved one, so
+the cluster reappears in exactly one queue bucket (`claimed_by_me`,
+`claimed_by_others` or `unclaimed`) and in the report's active `claims`.
+
 The same actions are available over HTTP (`GET /api/queue?reviewer=NAME` and
 `POST /api/clusters/{id}/{claim,release,resolve}`) and on the dashboard
 "Review queue" card, which shows the three buckets with claim/release/resolve

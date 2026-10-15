@@ -214,9 +214,11 @@ def _queue_lists(store, active, target: str):
     claimed_by_others: List[Dict[str, object]] = []
     unclaimed: List[Dict[str, object]] = []
     for cluster in active:
-        if not cluster.uncertainty or cluster.id in resolved_ids:
+        if not cluster.uncertainty:
             continue
         claim = active_claims.get(cluster.id)
+        if claim is None and cluster.id in resolved_ids:
+            continue
         entry = {
             "id": cluster.id,
             "label": cluster.label,
