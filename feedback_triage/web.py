@@ -200,11 +200,15 @@ class FeedbackTriageApp:
             for c in self.store.clusters
             if c.status != ACTIVE
         ]
-        return (
-            DASHBOARD_TEMPLATE
-            .replace("__REPORT__", _json_for_script(report))
-            .replace("__DISCARDED__", _json_for_script(discarded))
-            .replace("__CONTROLS__", _controls_script())
+        values = {
+            "__REPORT__": _json_for_script(report),
+            "__DISCARDED__": _json_for_script(discarded),
+            "__CONTROLS__": _controls_script(),
+        }
+        return re.sub(
+            "__REPORT__|__DISCARDED__|__CONTROLS__",
+            lambda match: values[match.group(0)],
+            DASHBOARD_TEMPLATE,
         )
 
 

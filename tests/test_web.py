@@ -1,8 +1,9 @@
 import io
 import json
+import re
 import unittest
 
-from feedback_triage.models import FeedbackItem
+from feedback_triage.models import DISCARDED, Cluster, FeedbackItem
 from feedback_triage.store import TriageStore
 from feedback_triage.web import FeedbackTriageApp, _controls_script, _json_for_script
 
@@ -72,6 +73,39 @@ class WebTests(unittest.TestCase):
         self.assertTrue(status.startswith("200"))
         self.assertNotIn(b"</script><script>alert", body)
         self.assertIn(b"\\u003c/script\\u003e", body)
+
+    def test_dashboard_placeholders_are_not_rescanned(self):
+        self.store.add_items(
+            [
+                FeedbackItem(
+                    id="t1",
+                    text="broken export __DISCARDED__ __CONTROLS__ __REPORT__ here",
+                ),
+                FeedbackItem(
+                    id="t2",
+                    text="broken export __DISCARDED__ __CONTROLS__ __REPORT__ again",
+                ),
+            ],
+            recluster=False,
+        )
+        self.store.workspace.clusters = [
+            Cluster(id="c1", label="Cluster __DISCARDED__", item_ids=["t1", "t2"]),
+            Cluster(id="d1", label="Discarded __CONTROLS__", item_ids=[], status=DISCARDED),
+        ]
+        status, _, body = self.call("GET", "/")
+        self.assertTrue(status.startswith("200"))
+        html = body.decode("utf-8")
+        match = re.search(
+            r"const REPORT = (.*?);\nconst DISCARDED = (.*?);\n", html
+        )
+        self.assertIsNotNone(match, "dashboard script placeholders missing")
+        report = json.loads(match.group(1))
+        discarded = json.loads(match.group(2))
+        self.assertIn("__DISCARDED__", match.group(1))
+        self.assertIn("__CONTROLS__", match.group(1))
+        self.assertEqual(report["clusters"][0]["label"], "Cluster __DISCARDED__")
+        self.assertEqual(discarded[0]["label"], "Discarded __CONTROLS__")
+        self.assertEqual(len(discarded), 1)
 
     def test_json_for_script_escapes_dangerous_characters(self):
         payload = {"text": "</script><b>&x</b>\u2028"}
