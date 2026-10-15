@@ -65,6 +65,16 @@ class FeedbackTriageApp:
         if path == "/api/history" and method == "GET":
             history = [h.to_dict() for h in self.store.history]
             return self._json(200, {"history": history})
+        if path == "/api/reviewers" and method == "GET":
+            reviewers = [r.to_dict() for r in self.store.list_reviewers()]
+            return self._json(200, {"reviewers": reviewers})
+        if path == "/api/reviewers" and method == "POST":
+            payload = self._payload(environ)
+            name = str(payload.get("name", "")).strip()
+            if not name:
+                raise ValueError("name is required")
+            reviewer = self.store.add_reviewer(name)
+            return self._json(200, {"ok": True, "reviewer": reviewer.to_dict()})
         if path == "/report.csv" and method == "GET":
             return (
                 "200 OK",
@@ -84,14 +94,22 @@ class FeedbackTriageApp:
         if path == "/api/import" and method == "POST":
             return self._import(environ)
         if path == "/api/recluster" and method == "POST":
-            self.store.recluster()
+            payload = self._payload(environ)
+            self.store.recluster(
+                reviewer=str(payload.get("reviewer", "") or ""),
+                note=str(payload.get("note", "") or ""),
+            )
             return self._json(200, build_report(self.store))
         if path == "/api/merge" and method == "POST":
             payload = self._payload(environ)
             cluster_ids = payload.get("cluster_ids") or []
             if not isinstance(cluster_ids, list) or len(cluster_ids) < 2:
                 raise ValueError("cluster_ids must contain at least two clusters")
-            merged = self.store.merge(cluster_ids)
+            merged = self.store.merge(
+                cluster_ids,
+                reviewer=str(payload.get("reviewer", "") or ""),
+                note=str(payload.get("note", "") or ""),
+            )
             return self._json(200, {"ok": True, "cluster_id": merged.id})
 
         action = CLUSTER_ACTION.match(path)
@@ -115,16 +133,22 @@ class FeedbackTriageApp:
         for key in ("text", "segment", "source", "url", "created_at", "rating"):
             if key in query:
                 mapping[key] = query[key][0]
+        reviewer = (query.get("reviewer") or [""])[0]
+        note = (query.get("note") or [""])[0]
         content_type = str(environ.get("CONTENT_TYPE", ""))
         if "application/json" in content_type:
             payload = json.loads(body or "{}")
             content = payload.get("csv", "")
             source = payload.get("source", source)
             mapping.update(payload.get("mapping", {}) or {})
+            reviewer = payload.get("reviewer", reviewer)
+            note = payload.get("note", note)
         else:
             content = body
         items = parse_csv(content, source=source, mapping=mapping or None)
-        added = self.store.add_items(items)
+        added = self.store.add_items(
+            items, reviewer=str(reviewer or ""), note=str(note or "")
+        )
         report = build_report(self.store)
         return self._json(200, {"added": added, "total": len(self.store.items),
                                 "clusters": report["totals"]["clusters"]})
@@ -134,20 +158,26 @@ class FeedbackTriageApp:
     ) -> Tuple[str, Dict[str, str], object]:
         cluster_id = unquote(cluster_id)
         payload = self._payload(environ)
+        reviewer = str(payload.get("reviewer", "") or "")
+        note = str(payload.get("note", "") or "")
         if action == "discard":
-            self.store.discard(cluster_id)
+            self.store.discard(cluster_id, reviewer=reviewer, note=note)
         elif action == "restore":
-            self.store.restore(cluster_id)
+            self.store.restore(cluster_id, reviewer=reviewer, note=note)
         elif action == "rename":
             label = str(payload.get("label", "")).strip()
             if not label:
                 raise ValueError("label is required")
-            self.store.rename(cluster_id, label)
+            self.store.rename(
+                cluster_id, label, reviewer=reviewer, note=note
+            )
         elif action == "split":
             item_ids = payload.get("item_ids") or []
             if not isinstance(item_ids, list) or not item_ids:
                 raise ValueError("item_ids must be a non-empty list")
-            self.store.split(cluster_id, item_ids)
+            self.store.split(
+                cluster_id, item_ids, reviewer=reviewer, note=note
+            )
         return self._json(200, {"ok": True, "action": action})
 
     # helpers ------------------------------------------------------------
@@ -288,10 +318,16 @@ a{color:#2563eb;word-break:break-all}
 <input type="file" id="csv-file" accept=".csv">
 <button onclick="importFile()">Import CSV</button>
 </label>
+<label style="display:flex;align-items:center;gap:6px">
+Reviewer:
+<select id="reviewer-select" title="Reviewer for your decisions"></select>
+</label>
+<button onclick="addReviewer()">Add reviewer</button>
 </div>
 <div id="summary" class="card"></div>
 <div id="clusters"></div>
 <div id="discarded"></div>
+<div id="decisions"></div>
 </main>
 <script>
 const REPORT = __REPORT__;
@@ -373,22 +409,58 @@ async function post(url, body){
   if(!r.ok){alert(data.error||('HTTP '+r.status));return null;}
   return data;
 }
+async function loadReviewers(){
+  const sel=document.getElementById('reviewer-select');
+  if(!sel)return;
+  const previous=sel.value;
+  let reviewers=[];
+  try{const r=await fetch('/api/reviewers');
+    if(r.ok){reviewers=(await r.json()).reviewers||[];}}catch(e){}
+  sel.innerHTML='<option value="">(no reviewer)</option>'+
+    reviewers.map(v=>`<option value="${attr(v.id)}">${esc(v.name)}</option>`).join('');
+  if(previous)sel.value=previous;
+}
+function currentReviewer(){const sel=document.getElementById('reviewer-select');return sel?sel.value:'';}
+function optionalNote(message){const value=prompt(message);return value?value:'';}
+function withReviewer(body){const out=Object.assign({},body||{});const rv=currentReviewer();
+  if(rv)out.reviewer=rv;return out;}
+async function addReviewer(){const name=prompt('Reviewer name');if(!name)return;
+  if(await post('/api/reviewers',{name}))location.reload();}
 async function mergeSelected(){const ids=selected();if(ids.length<2){alert('Select at least two clusters.');return;}
-  if(await post('/api/merge',{cluster_ids:ids}))location.reload();}
-async function discardCluster(id){if(await post(`/api/clusters/${id}/discard`))location.reload();}
-async function restoreCluster(id){if(await post(`/api/clusters/${id}/restore`))location.reload();}
+  const note=optionalNote('Optional note for this merge');
+  if(await post('/api/merge',withReviewer({cluster_ids:ids,note}))location.reload();}
+async function discardCluster(id){const note=optionalNote('Optional note for discarding this cluster');
+  if(await post(`/api/clusters/${id}/discard`,withReviewer({note})))location.reload();}
+async function restoreCluster(id){if(await post(`/api/clusters/${id}/restore`,withReviewer({})))location.reload();}
 async function renameCluster(id){const label=prompt('New label');if(!label)return;
-  if(await post(`/api/clusters/${id}/rename`,{label}))location.reload();}
+  const note=optionalNote('Optional note for this rename');
+  if(await post(`/api/clusters/${id}/rename`,withReviewer({label,note})))location.reload();}
 async function splitCluster(id){const items=selectedItems();if(!items.length){alert('Select quotes to split off.');return;}
-  if(await post(`/api/clusters/${id}/split`,{item_ids:items}))location.reload();}
-async function recluster(){if(await post('/api/recluster'))location.reload();}
+  const note=optionalNote('Optional note for this split');
+  if(await post(`/api/clusters/${id}/split`,withReviewer({item_ids:items,note})))location.reload();}
+async function recluster(){if(await post('/api/recluster',withReviewer({})))location.reload();}
 async function importFile(){const f=document.getElementById('csv-file').files[0];
   if(!f){alert('Choose a CSV file first.');return;}
   const csv=await f.text();
-  const r=await fetch('/api/import?source=upload',{method:'POST',
+  const rv=currentReviewer();
+  const r=await fetch('/api/import?source=upload'+(rv?'&reviewer='+encodeURIComponent(rv):''),{method:'POST',
     headers:{'Content-Type':'text/csv'},body:csv});
   if(r.ok)location.reload();else alert('Import failed');}
+function renderDecisions(){
+  const root=document.getElementById('decisions');
+  const decisions=REPORT.decisions||[];
+  if(!decisions.length){root.innerHTML='';return;}
+  root.innerHTML=`<h2 style="margin:18px 0 0;font-size:1.05rem">Decision log</h2>`+
+    decisions.map(d=>`<section class="card">
+      <p class="metrics"><strong>${esc(d.action)}</strong> &middot;
+        ${esc(d.reviewer||'unreviewed')} &middot; ${esc(d.timestamp)}</p>
+      ${d.clusters&&d.clusters.length?`<p class="metrics">Clusters: ${esc(d.clusters.join(', '))}</p>`:''}
+      ${d.note?`<p>${esc(d.note)}</p>`:''}
+    </section>`).join('');
+}
 function doMerge(){mergeSelected();}
 render();
 renderDiscarded();
+renderDecisions();
+loadReviewers();
 """

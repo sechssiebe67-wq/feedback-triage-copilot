@@ -10,6 +10,14 @@ from feedback_triage.report import (
 from feedback_triage.store import TriageStore
 
 
+def decision_store():
+    store = make_store()
+    reviewer = store.add_reviewer("Alice")
+    cluster = store.active_clusters()[0]
+    store.discard(cluster.id, reviewer=reviewer.id, note="duplicate of PDF export")
+    return store, reviewer
+
+
 def make_store():
     store = TriageStore()
     store.add_items([
@@ -129,6 +137,72 @@ class HtmlTests(unittest.TestCase):
         html = report_to_html(build_report(make_store()))
         self.assertIn('href="http://', html)
         self.assertIn('rel="noopener noreferrer"', html)
+
+
+class DecisionLogTests(unittest.TestCase):
+    def test_report_payload_has_resolved_decisions(self):
+        store, reviewer = decision_store()
+        report = build_report(store)
+        self.assertIn("decisions", report)
+        latest = report["decisions"][0]
+        self.assertEqual(latest["action"], "discard")
+        self.assertEqual(latest["reviewer"], "Alice")
+        self.assertEqual(latest["note"], "duplicate of PDF export")
+        self.assertTrue(latest["timestamp"])
+        self.assertTrue(latest["clusters"])
+
+    def test_decision_falls_back_to_raw_reviewer_value(self):
+        store = make_store()
+        store.discard(store.active_clusters()[0].id, reviewer="Alice", note="x")
+        report = build_report(store)
+        self.assertEqual(report["decisions"][0]["reviewer"], "Alice")
+
+    def test_report_header_reviewer_and_note(self):
+        report = build_report(make_store(), reviewer="Alice", note="week 42")
+        self.assertEqual(report["reviewer"], "Alice")
+        self.assertEqual(report["note"], "week 42")
+
+    def test_csv_has_decision_columns_and_rows(self):
+        store, _ = decision_store()
+        csv_text = report_to_csv(build_report(store))
+        header = csv_text.splitlines()[0]
+        for column in (
+            "decision_timestamp", "decision_action", "decision_reviewer",
+            "decision_note", "decision_clusters",
+        ):
+            self.assertIn(column, header)
+        self.assertIn("duplicate of PDF export", csv_text)
+        self.assertIn("discard", csv_text)
+
+    def test_csv_neutralises_decision_formula_injection(self):
+        store = make_store()
+        store.discard(
+            store.active_clusters()[0].id, reviewer="=cmd", note="+1+1",
+        )
+        csv_text = report_to_csv(build_report(store))
+        self.assertIn("'=cmd", csv_text)
+        self.assertIn("'+1+1", csv_text)
+
+    def test_html_renders_decision_log_and_escapes(self):
+        store = make_store()
+        reviewer = store.add_reviewer("<b>Eve</b>")
+        store.discard(
+            store.active_clusters()[0].id,
+            reviewer=reviewer.id,
+            note="</script><script>alert(1)</script>",
+        )
+        html = report_to_html(build_report(store))
+        self.assertIn("Decision log", html)
+        self.assertNotIn("<b>Eve</b>", html)
+        self.assertIn("&lt;b&gt;Eve&lt;/b&gt;", html)
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;", html)
+
+    def test_pdf_renders_decision_log(self):
+        store, _ = decision_store()
+        pdf = report_to_pdf(build_report(store))
+        self.assertIn(b"Decision log", pdf)
+        self.assertIn(b"Alice", pdf)
 
 
 class PdfTests(unittest.TestCase):

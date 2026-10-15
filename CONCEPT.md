@@ -49,6 +49,12 @@ A weekly, automatically clustered report where each topic carries:
   chosen by closeness to the cluster centroid; no opaque score ranking.
 - **Corrections:** merge, split, discard/restore and rename with an append-only
   history so every change is auditable.
+- **Reviewer accounts and decision log:** a lightweight list of named reviewers
+  in the workspace; every merge, split, discard, restore, rename, re-cluster and
+  import can be attributed to a reviewer and carry a short rationale. The
+  decision log is exported alongside the report (JSON, CSV, HTML, PDF) and is
+  visible on the dashboard, turning the correction history into an auditable
+  decision log without authentication or a database.
 - **Persistence:** single JSON workspace file; works without a database.
 - **Operations:** `/healthz` endpoint, WSGI server, container image and Helm
   chart for the existing k3s / Argo CD setup.
@@ -75,7 +81,8 @@ so it is resource-efficient, easy to test offline and cheap to operate.
 1. Scheduled weekly ingestion jobs and per-source connectors.
 2. Embedding-based similarity as an optional upgrade over TF-IDF.
 3. Multi-language stop-word handling and per-language clustering.
-4. Reviewer accounts, comments per cluster and exported decision log.
+4. Per-reviewer weekly digest and load balancing across reviewers (follow-up to
+   the reviewer accounts and decision log now shipped).
 5. Slack/e-mail digest of the weekly report.
 6. Volume-based subscription tiers (99 EUR up to 2,000 items / 299 EUR up to
    10,000 items per workspace).
@@ -87,6 +94,13 @@ least 100 feedback items per week, plus a concierge prototype with a design
 partner (500 real items clustered, corrected and rated). Success criteria
 before further investment: three of five teams halve triage time, at least 70%
 of clusters accepted unchanged, and at least two teams commit to a paid pilot.
+
+Reviewer attribution strengthens this plan: because every correction is tied to
+a named reviewer and an optional rationale, the prototype produces a defensible
+audit trail instead of an anonymous edit list. Interviews can reconstruct *why*
+a theme was merged, split or discarded, and disputed prioritisation decisions
+can be traced back to the person and the note that justified them, which makes
+the "defensible prioritisation" promise verifiable rather than aspirational.
 
 ## Platform requirements
 

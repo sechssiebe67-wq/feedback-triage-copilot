@@ -73,13 +73,42 @@ class Cluster:
 
 
 @dataclass
+class Reviewer:
+    """A named identity that can be attributed to triage decisions.
+
+    The MVP deliberately has no authentication: a reviewer is a label chosen
+    in the UI or supplied via the API/CLI. Keeping reviewers as workspace data
+    preserves the database-free design.
+    """
+
+    id: str
+    name: str
+    created_at: str = field(default_factory=now_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Reviewer":
+        known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass
 class EditEvent:
-    """An append-only audit record for a user correction."""
+    """An append-only audit record for a user correction.
+
+    ``reviewer`` and ``note`` are optional: workspaces written before reviewer
+    attribution existed load with empty strings, so the history stays backward
+    compatible while every new decision can carry an identity and a rationale.
+    """
 
     id: str
     timestamp: str
     action: str
     details: Dict[str, Any] = field(default_factory=dict)
+    reviewer: str = ""
+    note: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -97,6 +126,7 @@ class Workspace:
     items: List[FeedbackItem] = field(default_factory=list)
     clusters: List[Cluster] = field(default_factory=list)
     history: List[EditEvent] = field(default_factory=list)
+    reviewers: List[Reviewer] = field(default_factory=list)
     version: int = 1
     settings: Dict[str, Any] = field(
         default_factory=lambda: {
@@ -112,6 +142,7 @@ class Workspace:
             "items": [i.to_dict() for i in self.items],
             "clusters": [c.to_dict() for c in self.clusters],
             "history": [h.to_dict() for h in self.history],
+            "reviewers": [r.to_dict() for r in self.reviewers],
         }
 
     @classmethod
@@ -120,6 +151,7 @@ class Workspace:
             items=[FeedbackItem.from_dict(i) for i in data.get("items", [])],
             clusters=[Cluster.from_dict(c) for c in data.get("clusters", [])],
             history=[EditEvent.from_dict(h) for h in data.get("history", [])],
+            reviewers=[Reviewer.from_dict(r) for r in data.get("reviewers", [])],
             version=int(data.get("version", 1)),
             settings=data.get("settings")
             or {"similarity_threshold": 0.14, "min_support": 2},

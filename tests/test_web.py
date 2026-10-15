@@ -219,6 +219,102 @@ class WebTests(unittest.TestCase):
         self.assertTrue(status.startswith("200"))
         self.assertEqual(json.loads(body)["added"], 1)
 
+    def add_reviewer(self, name="Alice"):
+        payload = json.dumps({"name": name}).encode()
+        status, _, body = self.call(
+            "POST", "/api/reviewers", payload, content_type="application/json"
+        )
+        self.assertTrue(status.startswith("200"))
+        return json.loads(body)["reviewer"]
+
+    def test_reviewers_endpoints(self):
+        status, _, body = self.call("GET", "/api/reviewers")
+        self.assertTrue(status.startswith("200"))
+        self.assertEqual(json.loads(body)["reviewers"], [])
+        self.add_reviewer("Alice")
+        status, _, body = self.call("GET", "/api/reviewers")
+        reviewers = json.loads(body)["reviewers"]
+        self.assertEqual([r["name"] for r in reviewers], ["Alice"])
+
+    def test_add_reviewer_requires_name(self):
+        payload = json.dumps({"name": "  "}).encode()
+        status, _, _ = self.call(
+            "POST", "/api/reviewers", payload, content_type="application/json"
+        )
+        self.assertTrue(status.startswith("400"))
+
+    def test_merge_records_reviewer_and_note(self):
+        self.import_csv()
+        reviewer = self.add_reviewer()
+        _, _, body = self.call("GET", "/api/report")
+        ids = [c["id"] for c in json.loads(body)["clusters"]]
+        payload = json.dumps({
+            "cluster_ids": ids,
+            "reviewer": reviewer["id"],
+            "note": "same theme",
+        }).encode()
+        status, _, _ = self.call(
+            "POST", "/api/merge", payload, content_type="application/json"
+        )
+        self.assertTrue(status.startswith("200"))
+        _, _, body = self.call("GET", "/api/report")
+        latest = json.loads(body)["decisions"][0]
+        self.assertEqual(latest["action"], "merge")
+        self.assertEqual(latest["reviewer"], "Alice")
+        self.assertEqual(latest["note"], "same theme")
+
+    def test_discard_records_reviewer_and_note(self):
+        self.import_csv()
+        reviewer = self.add_reviewer()
+        _, _, body = self.call("GET", "/api/report")
+        cluster_id = json.loads(body)["clusters"][0]["id"]
+        payload = json.dumps({
+            "reviewer": reviewer["id"],
+            "note": "duplicate of PDF export",
+        }).encode()
+        status, _, _ = self.call(
+            "POST", "/api/clusters/%s/discard" % cluster_id,
+            payload, content_type="application/json",
+        )
+        self.assertTrue(status.startswith("200"))
+        _, _, body = self.call("GET", "/api/report")
+        latest = json.loads(body)["decisions"][0]
+        self.assertEqual(latest["action"], "discard")
+        self.assertEqual(latest["reviewer"], "Alice")
+        self.assertEqual(latest["note"], "duplicate of PDF export")
+
+    def test_dashboard_has_reviewer_selector_and_decision_log(self):
+        self.import_csv()
+        self.add_reviewer()
+        _, _, body = self.call("GET", "/")
+        self.assertIn(b"reviewer-select", body)
+        self.assertIn(b"addReviewer", body)
+        self.assertIn(b"renderDecisions", body)
+        self.assertIn(b"loadReviewers", body)
+
+    def test_report_csv_exposes_decision_columns(self):
+        self.import_csv()
+        status, _, body = self.call("GET", "/report.csv")
+        self.assertTrue(status.startswith("200"))
+        self.assertIn(b"decision_action", body)
+        self.assertIn(b"decision_reviewer", body)
+
+    def test_report_html_and_pdf_include_decision_log(self):
+        self.import_csv()
+        reviewer = self.add_reviewer()
+        _, _, body = self.call("GET", "/api/report")
+        cluster_id = json.loads(body)["clusters"][0]["id"]
+        payload = json.dumps({"reviewer": reviewer["id"], "note": "noise"}).encode()
+        self.call(
+            "POST", "/api/clusters/%s/discard" % cluster_id,
+            payload, content_type="application/json",
+        )
+        _, _, body = self.call("GET", "/report.html")
+        self.assertIn(b"Decision log", body)
+        self.assertIn(b"Alice", body)
+        _, _, body = self.call("GET", "/report.pdf")
+        self.assertIn(b"Decision log", body)
+
 
 if __name__ == "__main__":
     unittest.main()

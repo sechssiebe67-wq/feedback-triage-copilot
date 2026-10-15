@@ -18,6 +18,7 @@ from .models import (
     Cluster,
     EditEvent,
     FeedbackItem,
+    Reviewer,
     Workspace,
     now_iso,
 )
@@ -66,8 +67,52 @@ class TriageStore:
     def history(self) -> List[EditEvent]:
         return self.workspace.history
 
+    @property
+    def reviewers(self) -> List[Reviewer]:
+        return self.workspace.reviewers
+
     def items_by_id(self) -> Dict[str, FeedbackItem]:
         return {item.id: item for item in self.workspace.items}
+
+    # -- reviewers -------------------------------------------------------
+    def add_reviewer(self, name: str) -> Reviewer:
+        """Add a reviewer identity and return it.
+
+        Names are unique case-insensitively: re-adding an existing name returns
+        the stored reviewer instead of creating a duplicate.
+        """
+        cleaned = (name or "").strip()
+        if not cleaned:
+            raise ValueError("reviewer name is required")
+        for existing in self.workspace.reviewers:
+            if existing.name.lower() == cleaned.lower():
+                return existing
+        reviewer = Reviewer(id="r" + uuid.uuid4().hex[:10], name=cleaned)
+        self.workspace.reviewers.append(reviewer)
+        self.save()
+        return reviewer
+
+    def list_reviewers(self) -> List[Reviewer]:
+        return list(self.workspace.reviewers)
+
+    def get_reviewer(self, reviewer_id: str) -> Reviewer:
+        for reviewer in self.workspace.reviewers:
+            if reviewer.id == reviewer_id:
+                return reviewer
+        raise KeyError("Unknown reviewer: %s" % reviewer_id)
+
+    def reviewer_name(self, value: str) -> str:
+        """Resolve a reviewer id to a name, or return the raw value.
+
+        Decisions may be recorded with either an id (dashboard) or a name
+        (CLI), so unknown values pass through unchanged.
+        """
+        if not value:
+            return ""
+        for reviewer in self.workspace.reviewers:
+            if reviewer.id == value:
+                return reviewer.name
+        return value
 
     def active_clusters(self) -> List[Cluster]:
         return [c for c in self.workspace.clusters if c.status == ACTIVE]
@@ -86,7 +131,13 @@ class TriageStore:
         self.workspace.settings.update(values)
 
     # -- ingestion -------------------------------------------------------
-    def add_items(self, items: Sequence[FeedbackItem], recluster: bool = True) -> int:
+    def add_items(
+        self,
+        items: Sequence[FeedbackItem],
+        recluster: bool = True,
+        reviewer: str = "",
+        note: str = "",
+    ) -> int:
         existing = {item.id for item in self.workspace.items}
         added = 0
         for item in items:
@@ -98,6 +149,8 @@ class TriageStore:
         self._record(
             "import",
             {"added": added, "source": _sources(items)},
+            reviewer=reviewer,
+            note=note,
         )
         if recluster and added:
             self.recluster(record=False)
@@ -108,7 +161,7 @@ class TriageStore:
     # -- clustering ------------------------------------------------------
     def recluster(
         self, threshold: Optional[float] = None, min_support: Optional[int] = None,
-        record: bool = True,
+        record: bool = True, reviewer: str = "", note: str = "",
     ) -> List[Cluster]:
         threshold = float(
             threshold if threshold is not None else self.settings["similarity_threshold"]
@@ -123,13 +176,19 @@ class TriageStore:
                 "recluster",
                 {"clusters": len(clusters), "threshold": threshold,
                  "min_support": min_support},
+                reviewer=reviewer,
+                note=note,
             )
             self.save()
         return clusters
 
     # -- corrections -----------------------------------------------------
     def merge(
-        self, cluster_ids: Sequence[str], label: Optional[str] = None
+        self,
+        cluster_ids: Sequence[str],
+        label: Optional[str] = None,
+        reviewer: str = "",
+        note: str = "",
     ) -> Cluster:
         sources = [self.get_cluster(cid) for cid in cluster_ids]
         item_ids: List[str] = []
@@ -152,12 +211,19 @@ class TriageStore:
         self._record(
             "merge",
             {"cluster_id": merged.id, "sources": [c.id for c in sources]},
+            reviewer=reviewer,
+            note=note,
         )
         self.save()
         return merged
 
     def split(
-        self, cluster_id: str, item_ids: Sequence[str], label: Optional[str] = None
+        self,
+        cluster_id: str,
+        item_ids: Sequence[str],
+        label: Optional[str] = None,
+        reviewer: str = "",
+        note: str = "",
     ) -> Cluster:
         source = self.get_cluster(cluster_id)
         moving = [i for i in item_ids if i in source.item_ids]
@@ -179,42 +245,63 @@ class TriageStore:
         self._record(
             "split",
             {"cluster_id": new_cluster.id, "source": source.id, "moved": moving},
+            reviewer=reviewer,
+            note=note,
         )
         self.save()
         return new_cluster
 
-    def discard(self, cluster_id: str) -> Cluster:
+    def discard(self, cluster_id: str, reviewer: str = "", note: str = "") -> Cluster:
         cluster = self.get_cluster(cluster_id)
         cluster.status = DISCARDED
         cluster.updated_at = now_iso()
-        self._record("discard", {"cluster_id": cluster_id})
+        self._record(
+            "discard", {"cluster_id": cluster_id}, reviewer=reviewer, note=note
+        )
         self.save()
         return cluster
 
-    def restore(self, cluster_id: str) -> Cluster:
+    def restore(self, cluster_id: str, reviewer: str = "", note: str = "") -> Cluster:
         cluster = self.get_cluster(cluster_id)
         cluster.status = ACTIVE
         cluster.updated_at = now_iso()
-        self._record("restore", {"cluster_id": cluster_id})
+        self._record(
+            "restore", {"cluster_id": cluster_id}, reviewer=reviewer, note=note
+        )
         self.save()
         return cluster
 
-    def rename(self, cluster_id: str, label: str) -> Cluster:
+    def rename(
+        self, cluster_id: str, label: str, reviewer: str = "", note: str = ""
+    ) -> Cluster:
         cluster = self.get_cluster(cluster_id)
         old = cluster.label
         cluster.label = label
         cluster.updated_at = now_iso()
-        self._record("rename", {"cluster_id": cluster_id, "from": old, "to": label})
+        self._record(
+            "rename",
+            {"cluster_id": cluster_id, "from": old, "to": label},
+            reviewer=reviewer,
+            note=note,
+        )
         self.save()
         return cluster
 
     # -- helpers ---------------------------------------------------------
-    def _record(self, action: str, details: Dict[str, object]) -> EditEvent:
+    def _record(
+        self,
+        action: str,
+        details: Dict[str, object],
+        reviewer: str = "",
+        note: str = "",
+    ) -> EditEvent:
         event = EditEvent(
             id=uuid.uuid4().hex[:10],
             timestamp=now_iso(),
             action=action,
             details=details,
+            reviewer=reviewer or "",
+            note=note or "",
         )
         self.workspace.history.append(event)
         return event
