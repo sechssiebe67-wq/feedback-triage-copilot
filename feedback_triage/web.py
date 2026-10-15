@@ -23,6 +23,7 @@ from .store import TriageStore
 
 
 CLUSTER_ACTION = re.compile(r"^/api/clusters/([^/]+)/(discard|restore|rename|split)$")
+SOURCE_ACTION = re.compile(r"^/api/sources/([^/]+)/(enable|disable|run)$")
 
 
 class FeedbackTriageApp:
@@ -75,6 +76,34 @@ class FeedbackTriageApp:
                 raise ValueError("name is required")
             reviewer = self.store.add_reviewer(name)
             return self._json(200, {"ok": True, "reviewer": reviewer.to_dict()})
+        if path == "/api/sources" and method == "GET":
+            sources = [s.to_dict() for s in self.store.list_sources()]
+            return self._json(200, {"sources": sources})
+        if path == "/api/sources" and method == "POST":
+            return self._create_source(environ)
+        if path == "/api/ingest-runs" and method == "GET":
+            query = parse_qs(str(environ.get("QUERY_STRING", "")))
+            try:
+                limit = int((query.get("limit") or ["0"])[0])
+            except ValueError:
+                limit = 0
+            runs = list(self.store.ingest_runs)
+            if limit > 0:
+                runs = runs[-limit:]
+            return self._json(
+                200, {"ingest_runs": [r.to_dict() for r in runs]}
+            )
+        if path == "/api/ingest" and method == "POST":
+            payload = self._payload(environ)
+            runs = self.store.run_all_sources(
+                reviewer=str(payload.get("reviewer", "") or ""),
+                note=str(payload.get("note", "") or ""),
+            )
+            return self._json(200, {
+                "added": sum(r.added for r in runs),
+                "skipped": sum(r.skipped for r in runs),
+                "runs": [r.to_dict() for r in runs],
+            })
         if path == "/report.csv" and method == "GET":
             return (
                 "200 OK",
@@ -115,6 +144,11 @@ class FeedbackTriageApp:
         action = CLUSTER_ACTION.match(path)
         if action and method == "POST":
             return self._cluster_action(action.group(1), action.group(2), environ)
+        source_action = SOURCE_ACTION.match(path)
+        if source_action and method == "POST":
+            return self._source_action(
+                source_action.group(1), source_action.group(2), environ
+            )
         return self._json(404, {"error": "Not found: %s" % path})
 
     # handlers -----------------------------------------------------------
@@ -152,6 +186,49 @@ class FeedbackTriageApp:
         report = build_report(self.store)
         return self._json(200, {"added": added, "total": len(self.store.items),
                                 "clusters": report["totals"]["clusters"]})
+
+    def _create_source(
+        self, environ: Dict[str, object]
+    ) -> Tuple[str, Dict[str, str], object]:
+        payload = self._payload(environ)
+        name = str(payload.get("name", "") or "").strip()
+        path = str(payload.get("path", "") or "").strip()
+        if not name:
+            raise ValueError("name is required")
+        if not path:
+            raise ValueError("path is required")
+        enabled = payload.get("enabled", True)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() not in ("false", "0", "no", "")
+        source = self.store.add_source(
+            name,
+            path,
+            glob=str(payload.get("glob", "") or ""),
+            source_label=str(
+                payload.get("label", payload.get("source_label", "")) or ""
+            ),
+            segment_default=str(
+                payload.get("segment", payload.get("segment_default", "")) or ""
+            ),
+            enabled=bool(enabled),
+        )
+        return self._json(200, {"ok": True, "source": source.to_dict()})
+
+    def _source_action(
+        self, source_id: str, action: str, environ: Dict[str, object]
+    ) -> Tuple[str, Dict[str, str], object]:
+        source_id = unquote(source_id)
+        payload = self._payload(environ)
+        reviewer = str(payload.get("reviewer", "") or "")
+        note = str(payload.get("note", "") or "")
+        if action == "enable":
+            source = self.store.set_source_enabled(source_id, True)
+            return self._json(200, {"ok": True, "source": source.to_dict()})
+        if action == "disable":
+            source = self.store.set_source_enabled(source_id, False)
+            return self._json(200, {"ok": True, "source": source.to_dict()})
+        run = self.store.run_source(source_id, reviewer=reviewer, note=note)
+        return self._json(200, {"ok": True, "run": run.to_dict()})
 
     def _cluster_action(
         self, cluster_id: str, action: str, environ: Dict[str, object]
@@ -230,13 +307,17 @@ class FeedbackTriageApp:
             for c in self.store.clusters
             if c.status != ACTIVE
         ]
+        sources = [s.to_dict() for s in self.store.list_sources()]
+        ingest_runs = [r.to_dict() for r in self.store.ingest_runs][-10:]
         values = {
             "__REPORT__": _json_for_script(report),
             "__DISCARDED__": _json_for_script(discarded),
+            "__SOURCES__": _json_for_script(sources),
+            "__INGEST_RUNS__": _json_for_script(ingest_runs),
             "__CONTROLS__": _controls_script(),
         }
         return re.sub(
-            "__REPORT__|__DISCARDED__|__CONTROLS__",
+            "__REPORT__|__DISCARDED__|__SOURCES__|__INGEST_RUNS__|__CONTROLS__",
             lambda match: values[match.group(0)],
             DASHBOARD_TEMPLATE,
         )
@@ -325,6 +406,8 @@ Reviewer:
 <button onclick="addReviewer()">Add reviewer</button>
 </div>
 <div id="summary" class="card"></div>
+<div id="sources"></div>
+<div id="ingest-runs"></div>
 <div id="clusters"></div>
 <div id="discarded"></div>
 <div id="decisions"></div>
@@ -332,6 +415,8 @@ Reviewer:
 <script>
 const REPORT = __REPORT__;
 const DISCARDED = __DISCARDED__;
+const SOURCES = __SOURCES__;
+const INGEST_RUNS = __INGEST_RUNS__;
 __CONTROLS__
 </script>
 </body></html>
@@ -446,6 +531,41 @@ async function importFile(){const f=document.getElementById('csv-file').files[0]
   const r=await fetch('/api/import?source=upload'+(rv?'&reviewer='+encodeURIComponent(rv):''),{method:'POST',
     headers:{'Content-Type':'text/csv'},body:csv});
   if(r.ok)location.reload();else alert('Import failed');}
+function renderSources(){
+  const root=document.getElementById('sources');
+  if(!root)return;
+  if(!SOURCES.length){root.innerHTML='';return;}
+  root.innerHTML=`<h2 style="margin:18px 0 0;font-size:1.05rem">Sources</h2>`+
+    SOURCES.map(s=>`<section class="card">
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center">
+        <h2>${esc(s.name)} <span class="metrics">${s.enabled?'enabled':'disabled'}</span></h2>
+        <div>
+          <button class="source-run" data-source="${attr(s.id)}">Run</button>
+          <button class="source-toggle" data-source="${attr(s.id)}" data-enabled="${s.enabled?'false':'true'}">${s.enabled?'Disable':'Enable'}</button>
+        </div>
+      </div>
+      <p class="metrics">${esc(s.path)}${s.glob?` &middot; glob ${esc(s.glob)}`:''}</p>
+      <p class="metrics">last run ${esc(s.last_run_at||'never')} &middot; added ${s.last_added} &middot; skipped ${s.last_skipped}</p>
+    </section>`).join('');
+  root.querySelectorAll('.source-run').forEach(b=>{
+    b.addEventListener('click',()=>runSource(b.dataset.source));
+  });
+  root.querySelectorAll('.source-toggle').forEach(b=>{
+    b.addEventListener('click',()=>toggleSource(b.dataset.source,b.dataset.enabled==='true'));
+  });
+}
+function renderIngestRuns(){
+  const root=document.getElementById('ingest-runs');
+  if(!root)return;
+  if(!INGEST_RUNS.length){root.innerHTML='';return;}
+  root.innerHTML=`<h2 style="margin:18px 0 0;font-size:1.05rem">Recent ingestion runs</h2>`+
+    INGEST_RUNS.slice().reverse().map(r=>`<section class="card">
+      <p class="metrics"><strong>${esc(r.source_name)}</strong> &middot; ${esc(r.timestamp)} &middot; added ${r.added} &middot; skipped ${r.skipped}${r.errors.length?` &middot; errors ${r.errors.length}`:''}</p>
+      <p class="metrics">${esc((r.files||[]).join(', ')||'no files')}</p>
+    </section>`).join('');
+}
+async function runSource(id){if(await post(`/api/sources/${id}/run`,withReviewer({})))location.reload();}
+async function toggleSource(id,enabled){const action=enabled?'enable':'disable';if(await post(`/api/sources/${id}/${action}`,{}))location.reload();}
 function renderDecisions(){
   const root=document.getElementById('decisions');
   const decisions=REPORT.decisions||[];
@@ -460,6 +580,8 @@ function renderDecisions(){
 }
 function doMerge(){mergeSelected();}
 render();
+renderSources();
+renderIngestRuns();
 renderDiscarded();
 renderDecisions();
 loadReviewers();

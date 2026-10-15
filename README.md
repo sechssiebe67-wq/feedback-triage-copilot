@@ -18,6 +18,7 @@ No third-party dependencies are required (Python 3.8+ standard library only).
 # import sample sources into a workspace
 python3 -m feedback_triage --workspace workspace.json import data/sample_support.csv --source support
 python3 -m feedback_triage --workspace workspace.json import data/sample_reviews.csv --source app_review
+python3 -m feedback_triage --workspace workspace.json import data/sample_sales_notes.csv --source sales
 
 # render exports
 python3 -m feedback_triage --workspace workspace.json report --format csv --out report.csv
@@ -37,6 +38,12 @@ they can be restored.
 | Command | Purpose |
 | --- | --- |
 | `import <file> [--source NAME] [--no-recluster] [--reviewer NAME] [--note TEXT]` | Import a feedback CSV |
+| `source add <name> <path> [--glob GLOB] [--label LABEL] [--segment SEGMENT]` | Register a reusable source |
+| `source list` | List sources with enabled state and last run |
+| `source enable|disable <id>` | Toggle whether a source runs |
+| `source remove <id>` | Delete a source |
+| `ingest [--source ID] [--reviewer NAME] [--note TEXT]` | Run one or all enabled sources |
+| `ingest-log [--limit N]` | Print recent ingestion runs |
 | `cluster [--reviewer NAME] [--note TEXT]` | Re-cluster the workspace |
 | `report --format {csv,html,pdf,json} [--out FILE] [--reviewer NAME] [--note TEXT]` | Export the weekly report |
 | `reviewer add <name>` | Add a reviewer account |
@@ -50,6 +57,66 @@ they can be restored.
 python3 -m feedback_triage --workspace workspace.json reviewer add "Alice"
 python3 -m feedback_triage --workspace workspace.json import data/sample_support.csv --source support --reviewer Alice
 python3 -m feedback_triage --workspace workspace.json decisions
+```
+
+## Scheduled ingestion and idempotency
+
+Instead of importing files one by one, declare **sources** once and let a
+scheduled job run them. A source names a file or a directory plus an optional
+`glob`; a run records its files, `added`/`skipped` counts and any per-file
+errors, updates the source's `last_run_at`/`last_added`/`last_skipped`, and
+appends one `EditEvent` with action `ingest` to the decision log.
+
+```sh
+# register three sources (a file or a directory + glob)
+python3 -m feedback_triage --workspace workspace.json \
+  source add support data/sample_support.csv --label support --segment enterprise
+python3 -m feedback_triage --workspace workspace.json \
+  source add reviews data --glob 'sample_reviews*.csv' --label app_review
+python3 -m feedback_triage --workspace workspace.json \
+  source add sales data/sample_sales_notes.csv --label sales
+
+# run everything enabled, then inspect the run log
+python3 -m feedback_triage --workspace workspace.json ingest --reviewer Alice
+python3 -m feedback_triage --workspace workspace.json ingest-log
+```
+
+**Idempotency guarantee.** Every run deduplicates by item id. CSVs that carry
+an `id` column use it; CSVs without one get a deterministic id derived from the
+text, source, segment, URL and date, so re-running the same export never
+duplicates rows. Running the command above twice leaves the workspace item count
+unchanged on the second run (`added == 0`, `skipped == <rows>`). This makes the
+command safe for cron and Kubernetes `CronJob`. A file that fails to parse is
+recorded as an error entry and does not abort the rest of the run.
+
+A minimal Kubernetes `CronJob` (reusing the same image and workspace volume as
+the Deployment) that ingests every Monday at 06:00:
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: feedback-triage-ingest
+spec:
+  schedule: "0 6 * * 1"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: ingest
+              image: feedback-triage-copilot:0.1.0
+              args: ["python", "-m", "feedback_triage",
+                     "--workspace", "/data/workspace.json", "ingest"]
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: feedback-triage-data
 ```
 
 CSV columns are auto-detected (`text`, `segment`, `source`, `url`, `date`,
@@ -66,6 +133,12 @@ delimiter (`,`, `;`, tab, `|`) is sniffed automatically.
 | GET | `/api/clusters`, `/api/items`, `/api/history` | Raw data |
 | GET | `/api/reviewers` | List reviewer accounts |
 | POST | `/api/reviewers` | `{"name": "Alice"}` |
+| GET | `/api/sources` | List ingestion sources |
+| POST | `/api/sources` | `{"name": "...", "path": "...", "glob": "...", "label": "...", "segment": "..."}` |
+| POST | `/api/sources/{id}/{enable,disable}` | Toggle a source |
+| POST | `/api/sources/{id}/run` | Run one source; optional `reviewer`/`note` |
+| POST | `/api/ingest` | Run every enabled source; optional `reviewer`/`note` |
+| GET | `/api/ingest-runs?limit=N` | Recent ingestion runs |
 | POST | `/api/import?source=NAME` | Import CSV body |
 | POST | `/api/recluster` | Rebuild clusters |
 | POST | `/api/merge` | `{"cluster_ids": [...], "reviewer": "...", "note": "..."}` |

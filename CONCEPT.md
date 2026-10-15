@@ -41,6 +41,15 @@ A weekly, automatically clustered report where each topic carries:
 - **Ingestion:** flexible CSV import for two-three sources with column
   auto-detection (`text`, `segment`, `source`, `url`, `date`, `rating`,
   `language`, `id`).
+- **Scheduled per-source ingestion:** a workspace can declare named **sources**
+  (a file path or directory, an optional glob, a default source label and a
+  default segment). The CLI (`source`, `ingest`, `ingest-log`) and the HTTP API
+  (`/api/sources`, `/api/ingest`, `/api/ingest-runs`) can run one source or every
+  enabled source. Runs are idempotent (items already in the workspace are
+  skipped), isolated per file (a malformed CSV is recorded as an error and does
+  not abort the run) and append one `IngestRun` plus one `EditEvent` with action
+  `ingest` so the decision log stays complete. This makes weekly ingestion safe
+  for cron and a Kubernetes `CronJob`.
 - **Clustering:** dependency-free TF-IDF + leader clustering with configurable
   similarity threshold and minimum support.
 - **Uncertainty:** clusters below the support threshold, with low cohesion or
@@ -50,8 +59,9 @@ A weekly, automatically clustered report where each topic carries:
 - **Corrections:** merge, split, discard/restore and rename with an append-only
   history so every change is auditable.
 - **Reviewer accounts and decision log:** a lightweight list of named reviewers
-  in the workspace; every merge, split, discard, restore, rename, re-cluster and
-  import can be attributed to a reviewer and carry a short rationale. The
+  in the workspace; every merge, split, discard, restore, rename, re-cluster,
+  import and scheduled ingest can be attributed to a reviewer and carry a short
+  rationale. The
   decision log is exported alongside the report (JSON, CSV, HTML, PDF) and is
   visible on the dashboard, turning the correction history into an auditable
   decision log without authentication or a database.
@@ -63,10 +73,11 @@ A weekly, automatically clustered report where each topic carries:
 
 ```
 feedback_triage/
-  models.py    domain dataclasses and serialisation
+  models.py    domain dataclasses and serialisation (items, clusters, sources,
+               ingest runs, reviewers, history)
   ingest.py    CSV parsing with column auto-detection
   cluster.py   tokenisation, TF-IDF vectors, leader clustering, uncertainty
-  store.py     JSON workspace + correction history
+  store.py     JSON workspace, source registry, ingestion runs, corrections
   report.py    weekly report aggregation and CSV/HTML/PDF rendering
   web.py       WSGI application (dashboard, JSON API, exports, health)
   cli.py       command line entry point
@@ -78,7 +89,10 @@ so it is resource-efficient, easy to test offline and cheap to operate.
 
 ## Next direction
 
-1. Scheduled weekly ingestion jobs and per-source connectors.
+1. Real per-source connectors (support desk, app-store and CRM APIs) that feed
+   the source registry without a manual CSV export; the scheduled ingestion
+   pipeline, run log and idempotent dedupe shipped here are the foundation. A
+   Kubernetes `CronJob` already covers the scheduled part for CSV files.
 2. Embedding-based similarity as an optional upgrade over TF-IDF.
 3. Multi-language stop-word handling and per-language clustering.
 4. Per-reviewer weekly digest and load balancing across reviewers (follow-up to

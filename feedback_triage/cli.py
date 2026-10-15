@@ -52,6 +52,27 @@ def build_parser() -> argparse.ArgumentParser:
     reviewer_add.add_argument("name")
     reviewer_sub.add_parser("list", help="list reviewers")
 
+    source = sub.add_parser("source", help="manage ingestion sources")
+    source_sub = source.add_subparsers(dest="source_command", required=True)
+    source_add = source_sub.add_parser("add", help="register a source")
+    source_add.add_argument("name")
+    source_add.add_argument("path")
+    source_add.add_argument("--glob", default="", help="glob applied inside a directory")
+    source_add.add_argument("--label", default="", help="default feedback source label")
+    source_add.add_argument("--segment", default="", help="default segment for rows without one")
+    source_sub.add_parser("list", help="list sources")
+    for action in ("enable", "disable", "remove"):
+        action_parser = source_sub.add_parser(action, help="%s a source" % action)
+        action_parser.add_argument("id")
+
+    ingest = sub.add_parser("ingest", help="run one or all enabled sources")
+    ingest.add_argument("--source", default="", help="source id (default: all enabled)")
+    ingest.add_argument("--reviewer", default="", help="reviewer name or id")
+    ingest.add_argument("--note", default="", help="optional rationale")
+
+    ingest_log = sub.add_parser("ingest-log", help="print recent ingestion runs")
+    ingest_log.add_argument("--limit", type=int, default=20)
+
     sub.add_parser("history", help="print the correction history")
     sub.add_parser("decisions", help="print the attributed decision log")
     return parser
@@ -64,6 +85,69 @@ def _print_bytes(data: bytes, out: str) -> None:
         print("Wrote %s" % out)
     else:
         sys.stdout.buffer.write(data)
+
+
+def _format_run(run) -> str:
+    line = "%s  %-16s added=%d skipped=%d files=%d" % (
+        run.timestamp, run.source_name, run.added, run.skipped, len(run.files),
+    )
+    if run.errors:
+        line += " errors=%d" % len(run.errors)
+    if run.reviewer:
+        line += " reviewer=%s" % run.reviewer
+    return line
+
+
+def _handle_source(store: TriageStore, args) -> int:
+    if args.source_command == "add":
+        source = store.add_source(
+            args.name,
+            args.path,
+            glob=args.glob,
+            source_label=args.label,
+            segment_default=args.segment,
+        )
+        print("Added source %s (%s) -> %s" % (source.name, source.id, source.path))
+    elif args.source_command == "list":
+        sources = store.list_sources()
+        if not sources:
+            print("No sources configured.")
+        for source in sources:
+            state = "enabled" if source.enabled else "disabled"
+            print("  %-14s %-10s %-8s last_run=%s added=%d skipped=%d" % (
+                source.id,
+                source.name[:10],
+                state,
+                source.last_run_at or "-",
+                source.last_added,
+                source.last_skipped,
+            ))
+    elif args.source_command == "enable":
+        source = store.set_source_enabled(args.id, True)
+        print("Enabled source %s" % source.name)
+    elif args.source_command == "disable":
+        source = store.set_source_enabled(args.id, False)
+        print("Disabled source %s" % source.name)
+    elif args.source_command == "remove":
+        source = store.remove_source(args.id)
+        print("Removed source %s" % source.name)
+    return 0
+
+
+def _handle_ingest(store: TriageStore, args) -> int:
+    if args.source:
+        runs = [store.run_source(args.source, reviewer=args.reviewer, note=args.note)]
+    else:
+        runs = store.run_all_sources(reviewer=args.reviewer, note=args.note)
+    total_added = 0
+    total_skipped = 0
+    for run in runs:
+        total_added += run.added
+        total_skipped += run.skipped
+        print(_format_run(run))
+    print("Total: %d added, %d skipped across %d source(s), %d items in workspace"
+          % (total_added, total_skipped, len(runs), len(store.items)))
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -108,6 +192,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             for reviewer in store.list_reviewers():
                 print("%s  %s" % (reviewer.id, reviewer.name))
+        return 0
+
+    if args.command == "source":
+        return _handle_source(store, args)
+
+    if args.command == "ingest":
+        return _handle_ingest(store, args)
+
+    if args.command == "ingest-log":
+        runs = list(store.ingest_runs)[-max(args.limit, 0):]
+        for run in runs:
+            print(_format_run(run))
         return 0
 
     if args.command == "history":
