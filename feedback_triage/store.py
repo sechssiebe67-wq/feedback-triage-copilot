@@ -533,6 +533,7 @@ class TriageStore:
         reviewer = (reviewer or "").strip()
         if not reviewer:
             raise ValueError("reviewer is required to claim a cluster")
+        reviewer = self.reviewer_name(reviewer)
         existing = self.claim_for(cluster_id)
         if existing is not None:
             if existing.reviewer.lower() == reviewer.lower():
@@ -582,7 +583,7 @@ class TriageStore:
         active = self.claim_for(cluster_id)
         if active is None:
             raise ValueError("cluster %s has no active claim" % cluster_id)
-        reviewer = (reviewer or "").strip()
+        reviewer = self.reviewer_name((reviewer or "").strip())
         if reviewer and active.reviewer.lower() != reviewer.lower():
             raise ValueError(
                 "cluster %s is claimed by %s, not %s"
@@ -613,6 +614,7 @@ class TriageStore:
         reviewer = (reviewer or "").strip()
         if not reviewer:
             raise ValueError("reviewer is required to resolve a cluster")
+        reviewer = self.reviewer_name(reviewer)
         active = self.claim_for(cluster_id)
         if active is None:
             claim = Claim(

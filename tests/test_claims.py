@@ -277,6 +277,51 @@ class QueueDigestTests(unittest.TestCase):
         self.assertEqual([c["id"] for c in queue["claimed_by_others"]], ["c1"])
         self.assertEqual([c["id"] for c in queue["unclaimed"]], ["c2"])
 
+    def test_claim_by_reviewer_id_is_stored_as_name(self):
+        store = make_store()
+        alice = store.add_reviewer("Alice")
+        store.claim_cluster("c1", alice.id)
+        self.assertEqual(store.claim_for("c1").reviewer, "Alice")
+        digest = build_digest(store, alice.id)
+        self.assertEqual([c["id"] for c in digest["claimed_by_me"]], ["c1"])
+        self.assertEqual([c["id"] for c in digest["claimed_by_others"]], [])
+        queue = build_queue(store, alice.id)
+        self.assertEqual([c["id"] for c in queue["claimed_by_me"]], ["c1"])
+        self.assertEqual(queue["claimed_by_others"], [])
+
+    def test_release_with_reviewer_id_resolves_identity(self):
+        store = make_store()
+        alice = store.add_reviewer("Alice")
+        store.claim_cluster("c1", "Alice")
+        released = store.release_cluster("c1", alice.id)
+        self.assertEqual(released.reviewer, "Alice")
+        self.assertIsNone(store.claim_for("c1"))
+
+    def test_release_after_reclaim_returns_cluster_to_unclaimed(self):
+        store = make_store()
+        store.claim_cluster("c1", "Alice")
+        store.resolve_cluster("c1", "Alice")
+        store.claim_cluster("c1", "Bob")
+        store.release_cluster("c1", "Bob")
+
+        self.assertIsNone(store.claim_for("c1"))
+        queue = build_queue(store, "Bob")
+        self.assertEqual(queue["claimed_by_me"], [])
+        self.assertEqual(queue["claimed_by_others"], [])
+        self.assertEqual([c["id"] for c in queue["unclaimed"]], ["c1", "c2"])
+
+        digest = build_digest(store, "Bob")
+        self.assertEqual([c["id"] for c in digest["unclaimed"]], ["c1", "c2"])
+
+    def test_resolved_cluster_stays_hidden_after_release_of_other_cluster(self):
+        store = make_store()
+        store.resolve_cluster("c1", "Alice")
+        store.claim_cluster("c2", "Bob")
+        store.release_cluster("c2", "Bob")
+        queue = build_queue(store, "Bob")
+        self.assertEqual([c["id"] for c in queue["unclaimed"]], ["c2"])
+        self.assertNotIn("c1", [c["id"] for c in queue["unclaimed"]])
+
 
 class ReportClaimTests(unittest.TestCase):
     def test_report_exposes_active_claims_only(self):
@@ -519,6 +564,20 @@ class ClaimWebTests(unittest.TestCase):
         )
         self.assertTrue(status.startswith("200"))
         self.assertIsNone(self.store.claim_for("c1"))
+
+    def test_claim_with_reviewer_id_buckets_correctly(self):
+        alice = self.store.add_reviewer("Alice")
+        payload = json.dumps({"reviewer": alice.id}).encode()
+        status, _ = self.call("POST", "/api/clusters/c1/claim", payload)
+        self.assertTrue(status.startswith("200"))
+        self.assertEqual(self.store.claim_for("c1").reviewer, "Alice")
+        status, body = self.call(
+            "GET", "/api/queue", query="reviewer=%s" % alice.id
+        )
+        self.assertTrue(status.startswith("200"))
+        queue = json.loads(body)
+        self.assertEqual([c["id"] for c in queue["claimed_by_me"]], ["c1"])
+        self.assertEqual(queue["claimed_by_others"], [])
 
     def test_dashboard_renders_review_queue_and_controls(self):
         self.store.claim_cluster("c1", "Alice")

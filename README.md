@@ -226,6 +226,11 @@ audit trail. If a resolved cluster becomes uncertain again, a reviewer can claim
 it afresh: the new active claim takes precedence over the older resolved one, so
 the cluster reappears in exactly one queue bucket (`claimed_by_me`,
 `claimed_by_others` or `unclaimed`) and in the report's active `claims`.
+Releasing that fresh claim returns the cluster to the queue as unclaimed: the
+queue follows the cluster's latest claim, release or resolve event, not the
+older resolved record. Reviewer ids from the dashboard are resolved to the
+stored reviewer name on claim, release and resolve, so a reviewer using the
+dashboard sees their own claims under `claimed_by_me`.
 
 The same actions are available over HTTP (`GET /api/queue?reviewer=NAME` and
 `POST /api/clusters/{id}/{claim,release,resolve}`) and on the dashboard

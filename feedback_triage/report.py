@@ -13,7 +13,7 @@ import re
 from typing import Dict, List, Sequence
 
 from .cluster import build_tfidf, representative_quotes, tokenize
-from .models import ACTIVE, CLAIMED, RESOLVED, Cluster, EditEvent, FeedbackItem
+from .models import ACTIVE, CLAIMED, Cluster, EditEvent, FeedbackItem
 
 #: How many of the most recent decisions the exported log keeps.
 DECISION_LIMIT = 50
@@ -200,6 +200,31 @@ def build_digest(
     }
 
 
+#: Claim lifecycle actions that decide whether a cluster is currently resolved.
+_CLAIM_STATE_ACTIONS = ("claim", "release", "resolve")
+
+
+def _resolved_cluster_ids(store) -> set:
+    """Return clusters whose most recent claim lifecycle event was ``resolve``.
+
+    A resolved claim record may outlive a later claim/release cycle, so the
+    claim list alone cannot tell whether a cluster is currently resolved. The
+    append-only history records every claim, release and resolve in order; the
+    last such event per cluster is authoritative. This keeps a cluster that was
+    resolved, re-claimed and then released visible as unclaimed instead of
+    hiding behind the stale resolved record.
+    """
+    latest: Dict[str, str] = {}
+    for event in getattr(store, "history", []) or []:
+        if event.action not in _CLAIM_STATE_ACTIONS:
+            continue
+        for cluster_id in _affected_cluster_ids(event):
+            latest[cluster_id] = event.action
+    return {
+        cluster_id for cluster_id, action in latest.items() if action == "resolve"
+    }
+
+
 def _queue_lists(store, active, target: str):
     """Partition the uncertain, unresolved backlog for one reviewer.
 
@@ -209,7 +234,8 @@ def _queue_lists(store, active, target: str):
     """
     claims = list(getattr(store, "claims", []) or [])
     active_claims = {c.cluster_id: c for c in claims if c.status == CLAIMED}
-    resolved_ids = {c.cluster_id for c in claims if c.status == RESOLVED}
+    resolved_ids = _resolved_cluster_ids(store)
+    reviewers_by_id = {r.id: r.name for r in getattr(store, "reviewers", [])}
     claimed_by_me: List[Dict[str, object]] = []
     claimed_by_others: List[Dict[str, object]] = []
     unclaimed: List[Dict[str, object]] = []
@@ -219,18 +245,21 @@ def _queue_lists(store, active, target: str):
         claim = active_claims.get(cluster.id)
         if claim is None and cluster.id in resolved_ids:
             continue
+        claim_reviewer = (
+            reviewers_by_id.get(claim.reviewer, claim.reviewer) if claim else ""
+        )
         entry = {
             "id": cluster.id,
             "label": cluster.label,
             "size": len(cluster.item_ids),
             "uncertainty": list(cluster.uncertainty),
-            "claim_reviewer": claim.reviewer if claim else "",
+            "claim_reviewer": claim_reviewer,
             "claim_status": claim.status if claim else "",
             "claim_note": claim.note if claim else "",
         }
         if claim is None:
             unclaimed.append(entry)
-        elif claim.reviewer.lower() == target:
+        elif claim_reviewer.lower() == target:
             claimed_by_me.append(entry)
         else:
             claimed_by_others.append(entry)
